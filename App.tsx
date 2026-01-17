@@ -42,8 +42,21 @@ const INITIAL_KEYS: ManagedKey[] = [
   }
 ];
 
+// --- API HELPER ---
+const saveDataToApi = async (table: string, data: any) => {
+    try {
+        await fetch(`/api/data/${table}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+    } catch (e) {
+        console.error(`Lỗi lưu dữ liệu ${table}:`, e);
+    }
+};
+
 // --- COMPONENT: LOGIN SCREEN ---
-const LoginScreen = ({ onLogin, onGuest, onContact, onCreateKey }: any) => {
+const LoginScreen = ({ onLogin, onGuest, onContact, onCreateKey, isLoading }: any) => {
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
@@ -52,6 +65,17 @@ const LoginScreen = ({ onLogin, onGuest, onContact, onCreateKey }: any) => {
         e.preventDefault();
         onLogin(username, password, (err: string) => setError(err));
     };
+
+    if (isLoading) {
+        return (
+            <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+                <div className="text-center space-y-4">
+                    <Loader2 className="w-12 h-12 text-indigo-500 animate-spin mx-auto"/>
+                    <p className="text-slate-400">Đang đồng bộ dữ liệu từ máy chủ...</p>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
@@ -356,6 +380,7 @@ const AdminDashboard = ({ users, keys, setUsers, setKeys }: any) => {
 
             {view === 'KEYS' && (
                 <div className="space-y-6 animate-in slide-in-from-right">
+                    {/* Add Key Form */}
                     <div className="flex gap-2">
                          <div className="relative">
                             <input type="file" id="key-upload" className="hidden" accept=".txt" onChange={handleFileUpload} />
@@ -402,8 +427,9 @@ const AdminDashboard = ({ users, keys, setUsers, setKeys }: any) => {
 // --- MAIN APP COMPONENT ---
 export default function App() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
-  const [users, setUsers] = useState<UserProfile[]>(INITIAL_USERS);
-  const [keys, setKeys] = useState<ManagedKey[]>(INITIAL_KEYS);
+  const [users, setUsers] = useState<UserProfile[]>([]);
+  const [keys, setKeys] = useState<ManagedKey[]>([]);
+  const [isDataLoaded, setIsDataLoaded] = useState(false);
   
   // App States
   const [showAdmin, setShowAdmin] = useState(false);
@@ -470,6 +496,64 @@ export default function App() {
       }
   };
 
+  // --- DATA SYNCING ---
+  // Load initial data
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const [usersRes, keysRes] = await Promise.all([
+          fetch('/api/data/users'),
+          fetch('/api/data/keys')
+        ]);
+        
+        if (!usersRes.ok || !keysRes.ok) {
+            throw new Error(`Server returned status: ${usersRes.status} / ${keysRes.status}`);
+        }
+
+        const usersJson = await usersRes.json();
+        const keysJson = await keysRes.json();
+        
+        const loadedUsers = usersJson.data;
+        const loadedKeys = keysJson.data;
+
+        if (Array.isArray(loadedUsers) && loadedUsers.length > 0) {
+            setUsers(loadedUsers);
+        } else {
+            setUsers(INITIAL_USERS);
+            saveDataToApi('users', INITIAL_USERS);
+        }
+
+        if (Array.isArray(loadedKeys) && loadedKeys.length > 0) {
+            setKeys(loadedKeys);
+        } else {
+            setKeys(INITIAL_KEYS);
+            saveDataToApi('keys', INITIAL_KEYS);
+        }
+
+        setIsDataLoaded(true);
+      } catch (e) {
+        console.error("Failed to load data, using local defaults. Error:", e);
+        setUsers(INITIAL_USERS);
+        setKeys(INITIAL_KEYS);
+        setIsDataLoaded(true);
+      }
+    };
+    fetchData();
+  }, []);
+
+  // Auto-save changes
+  useEffect(() => {
+    if (isDataLoaded && users.length > 0) {
+        saveDataToApi('users', users);
+    }
+  }, [users, isDataLoaded]);
+
+  useEffect(() => {
+    if (isDataLoaded && keys.length > 0) {
+        saveDataToApi('keys', keys);
+    }
+  }, [keys, isDataLoaded]);
+
   // Handle Logic Login Check & Reset Daily Limit
   const handleLogin = (u: string, p: string, onError: any) => {
       const cleanUser = u.trim();
@@ -491,7 +575,7 @@ export default function App() {
               // Update back to state
               const newUsers = [...users];
               newUsers[userIndex] = user;
-              setUsers(newUsers);
+              setUsers(newUsers); // This triggers auto-save via useEffect
           }
 
           setCurrentUser(user);
@@ -502,6 +586,21 @@ export default function App() {
   };
 
   const handleGuest = () => {
+      // Logic khôi phục key nếu hệ thống không có key nào (do lỡ xóa)
+      const hasSystemKey = keys.some(k => k.allowedUserIds.length === 0);
+      if (!hasSystemKey) {
+          const defaultKey: ManagedKey = { 
+            id: 'key-system-default-restored', 
+            name: 'Key Hệ thống (Khôi phục)', 
+            key: process.env.API_KEY || '', 
+            status: 'VALID', 
+            usageCount: 0, 
+            isTrialKey: false, 
+            allowedUserIds: [] 
+          };
+          setKeys(prev => [...prev, defaultKey]);
+      }
+
       setCurrentUser({ uid: 'guest', displayName: 'Khách', role: 'GUEST', credits: 1000, planType: 'TRIAL', loginId: 'guest', email: '', photoURL: '', lastActive: '', isBlocked: false, expiryDate: 0, characterLimit: 1000, dailyKeyCount: 0, customVoices: [] });
   };
 
@@ -548,6 +647,8 @@ export default function App() {
       if (privateKey && privateKey.key && privateKey.key !== 'AIzaSyExampleKey') return privateKey.key;
       const sharedKey = keys.find(k => k.allowedUserIds.length === 0);
       if (sharedKey && sharedKey.key && sharedKey.key !== 'AIzaSyExampleKey') return sharedKey.key;
+      
+      // Fallback mạnh nhất: Trả về env key nếu danh sách quản lý bị trống
       return process.env.API_KEY || '';
   };
 
@@ -682,11 +783,21 @@ export default function App() {
     }
   };
 
-  // Reset player time when new audio generated
+  // Reset player time and Auto Play when new audio generated
   useEffect(() => {
-    if(state.audioUrl) {
+    if(state.audioUrl && audioRef.current) {
         setCurrentTime(0);
-        // Do not set isPlaying(true) here, rely on autoPlay + onPlay event
+        // Explicitly load and play to ensure autoplay works and updates UI state
+        audioRef.current.load();
+        const playPromise = audioRef.current.play();
+        if (playPromise !== undefined) {
+            playPromise
+                .then(() => setIsPlaying(true))
+                .catch(err => {
+                    console.warn("Autoplay blocked by browser:", err);
+                    setIsPlaying(false);
+                });
+        }
     }
   }, [state.audioUrl]);
 
@@ -697,6 +808,7 @@ export default function App() {
         onGuest={handleGuest} 
         onContact={() => window.open('https://zalo.me/0904567890', '_blank')}
         onCreateKey={() => window.open('https://aistudio.google.com/app/apikey', '_blank')}
+        isLoading={!isDataLoaded}
       />;
   }
 
