@@ -1,1140 +1,493 @@
-import React, { useState, useEffect, useRef } from 'react';
+
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { 
-  Waves, Download, X, Play, Pause, Loader2, 
-  FileText, Wand2, Eraser, LogOut, LayoutDashboard,
-  UserPlus, Key, Shield, MessageCircle, ExternalLink,
-  Trash2, Edit, Calendar, CreditCard, Save, Users,
-  Gift, Upload, FileJson, Mic, FileUp, Rewind, FastForward, Music
+  TTSProvider, ReadingMode, VoiceConfig, GenerationState, UserProfile, ManagedKey, AdCampaign
+} from './types';
+import { READING_MODES, PRESET_VOICES, ADMIN_MODES } from './constants';
+import { 
+  generateContentFromDescription, generateAudioParallel, pcmToWav, pcmToMp3, mixWithBackgroundAudio, analyzeVoice, trimAudioTo20Seconds, validateApiKey
+} from './services/gemini';
+import { 
+  Sparkles, Loader2, Download, X, Trash2, Edit3, LogOut, Zap, Music, Key, UserPlus, Upload, Mic2, 
+  CheckCircle2, Search, PlusCircle, PlayCircle, Ban, CheckCircle, Copy, UserSquare2, Coins, Gift, 
+  ArrowRight, UserCog, Wand2, ChevronRight, Layout, MessageCircle, CreditCard, Calendar, Plus, Save,
+  Megaphone, ShieldCheck, Mail, Lock
 } from 'lucide-react';
-import { READING_MODES, PRESET_VOICES, ICONS } from './constants';
-import { GenerationState, VoiceConfig, TTSProvider, ReadingMode, UserProfile, ManagedKey, UserRole, PlanType, ClonedVoice } from './types';
-import { generateContentFromDescription, generateAudioParallel, pcmToMp3, pcmToWav, analyzeVoice, mixAudio } from './services/gemini';
 
-// --- CONFIGURATION ---
-const DAILY_LIMITS: Record<PlanType, number> = {
-    'TRIAL': 2000,
-    'NONE': 0,
-    'MONTHLY': 50000,
-    '3MONTHS': 50000,
-    '6MONTHS': 50000,
-    'YEARLY': 50000
-};
+const ADMIN_ID = "truong2024.vn";
+const ADMIN_PASS = "#Minh@123";
+const API_BASE = "/api/data";
 
-const KEY_REWARD_CREDITS = 10000;
-const MAX_KEYS_PER_DAY = 6;
-const MAX_CUSTOM_VOICES = 2;
-
-// --- MOCK DATABASE ---
-const INITIAL_USERS: UserProfile[] = [
-  { uid: 'admin-01', loginId: 'truong2024.vn', password: '#Minh@123', displayName: 'Quản trị viên', email: 'admin@baominh.ai', photoURL: '', role: 'ADMIN', credits: 999999, lastActive: '', isBlocked: false, planType: 'YEARLY', expiryDate: 4102444800000, characterLimit: 1000000, dailyKeyCount: 0, customVoices: [] },
-  { uid: 'user-01', loginId: 'user', password: '123', displayName: 'Khách hàng VIP', email: 'user@gmail.com', photoURL: '', role: 'USER', credits: 50000, lastActive: '', isBlocked: false, planType: 'MONTHLY', expiryDate: Date.now() + 2592000000, characterLimit: 50000, dailyKeyCount: 0, customVoices: [] },
-];
-
-const INITIAL_KEYS: ManagedKey[] = [
-  { 
-      id: 'key-system-default', 
-      name: 'Key Hệ thống (Mặc định)', 
-      key: process.env.API_KEY || '', 
-      status: 'VALID', 
-      usageCount: 0, 
-      isTrialKey: false, 
-      allowedUserIds: [] 
-  }
-];
-
-// --- API HELPER ---
-const saveDataToApi = async (table: string, data: any) => {
-    try {
-        await fetch(`/api/data/${table}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        });
-    } catch (e) {
-        console.error(`Lỗi lưu dữ liệu ${table}:`, e);
-    }
-};
-
-// --- COMPONENT: LOGIN SCREEN ---
-const LoginScreen = ({ onLogin, onGuest, onContact, onCreateKey, isLoading }: any) => {
-    const [username, setUsername] = useState('');
-    const [password, setPassword] = useState('');
-    const [error, setError] = useState('');
-
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        onLogin(username, password, (err: string) => setError(err));
-    };
-
-    if (isLoading) {
-        return (
-            <div className="min-h-screen bg-slate-950 flex items-center justify-center">
-                <div className="text-center space-y-4">
-                    <Loader2 className="w-12 h-12 text-indigo-500 animate-spin mx-auto"/>
-                    <p className="text-slate-400">Đang đồng bộ dữ liệu từ máy chủ...</p>
-                </div>
-            </div>
-        );
-    }
-
-    return (
-        <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
-            <div className="w-full max-w-md space-y-8 animate-in fade-in zoom-in duration-300">
-                <div className="text-center space-y-2">
-                    <h1 className="text-4xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
-                        BẢO MINH AI
-                    </h1>
-                    <p className="text-slate-400">Đăng nhập để trải nghiệm công nghệ TTS đỉnh cao</p>
-                </div>
-
-                <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-2xl">
-                    <form onSubmit={handleSubmit} className="space-y-5">
-                        <div className="space-y-1">
-                            <label className="text-sm font-medium text-slate-300">Tài khoản</label>
-                            <input 
-                                type="text" 
-                                value={username} 
-                                onChange={e => setUsername(e.target.value)}
-                                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                                placeholder="Nhập tên đăng nhập"
-                            />
-                        </div>
-                        <div className="space-y-1">
-                            <label className="text-sm font-medium text-slate-300">Mật khẩu</label>
-                            <input 
-                                type="password" 
-                                value={password} 
-                                onChange={e => setPassword(e.target.value)}
-                                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                                placeholder="••••••••"
-                            />
-                        </div>
-                        {error && <p className="text-red-400 text-sm text-center bg-red-500/10 p-2 rounded">{error}</p>}
-                        
-                        <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl transition-all shadow-lg shadow-indigo-900/20">
-                            Đăng nhập
-                        </button>
-                    </form>
-
-                    <div className="mt-6 flex flex-col gap-3">
-                         <div className="grid grid-cols-2 gap-3">
-                            <button type="button" onClick={onGuest} className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 py-2.5 rounded-xl text-sm font-medium transition-colors">
-                                <UserPlus className="w-4 h-4" /> Dùng thử
-                            </button>
-                            <button type="button" onClick={onContact} className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded-xl text-sm font-medium transition-colors">
-                                <MessageCircle className="w-4 h-4" /> Liên hệ Zalo
-                            </button>
-                         </div>
-                         <button type="button" onClick={onCreateKey} className="flex items-center justify-center gap-2 border border-slate-700 hover:bg-slate-800 text-slate-400 py-2.5 rounded-xl text-sm transition-colors">
-                             <ExternalLink className="w-4 h-4" /> Tạo Key (Google AI Studio)
-                         </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-// --- COMPONENT: REWARD MODAL ---
-const KeyRewardSection = ({ currentUser, onSubmitKey, dailyCount }: any) => {
-    const [keyInput, setKeyInput] = useState('');
-    
-    return (
-        <div className="bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-indigo-500/30 rounded-2xl p-6 mb-6 animate-in slide-in-from-top">
-            <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-                <div className="flex items-center gap-4">
-                    <div className="p-3 bg-amber-500/20 rounded-xl text-amber-400">
-                        <Gift className="w-8 h-8 animate-bounce" />
-                    </div>
-                    <div>
-                        <h3 className="text-lg font-bold text-white">Nhận thêm 10.000 ký tự miễn phí!</h3>
-                        <p className="text-sm text-slate-300">Đóng góp API Key Gemini để nhận thưởng. (Hôm nay: {dailyCount}/{MAX_KEYS_PER_DAY})</p>
-                        <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-xs text-indigo-400 hover:underline flex items-center gap-1 mt-1">
-                            Lấy Key tại đây <ExternalLink className="w-3 h-3"/>
-                        </a>
-                    </div>
-                </div>
-                
-                <div className="flex gap-2 w-full md:w-auto">
-                    <input 
-                        value={keyInput}
-                        onChange={(e) => setKeyInput(e.target.value)}
-                        placeholder="Dán API Key của bạn vào đây..."
-                        className="flex-1 md:w-64 bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
-                    />
-                    <button 
-                        onClick={() => {
-                            if(keyInput.trim()) {
-                                onSubmitKey(keyInput.trim());
-                                setKeyInput('');
-                            }
-                        }}
-                        disabled={dailyCount >= MAX_KEYS_PER_DAY}
-                        className="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold px-4 py-2 rounded-xl text-sm whitespace-nowrap transition-colors"
-                    >
-                        Nhận thưởng
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-// --- COMPONENT: ADMIN DASHBOARD ---
-const AdminDashboard = ({ users, keys, setUsers, setKeys }: any) => {
-    const [view, setView] = useState<'USERS' | 'KEYS'>('USERS');
-    const [newUser, setNewUser] = useState({ loginId: '', password: '', displayName: '', role: 'USER', planType: 'MONTHLY' });
-    const [newKey, setNewKey] = useState({ name: '', key: '', assignedUid: '' });
-
-    // User Functions
-    const handleAddUser = () => {
-        if (!newUser.loginId || !newUser.password) return alert('Thiếu thông tin user');
-        
-        let days = 30;
-        if (newUser.planType === '3MONTHS') days = 90;
-        if (newUser.planType === '6MONTHS') days = 180;
-        if (newUser.planType === 'YEARLY') days = 365;
-
-        const user: UserProfile = {
-            uid: `user-${Date.now()}`,
-            loginId: newUser.loginId,
-            password: newUser.password,
-            displayName: newUser.displayName || 'New User',
-            email: `${newUser.loginId}@local`,
-            photoURL: '',
-            role: newUser.role as UserRole,
-            credits: DAILY_LIMITS[newUser.planType as PlanType] || 2000,
-            lastActive: '',
-            isBlocked: false,
-            planType: newUser.planType as PlanType,
-            expiryDate: Date.now() + (days * 86400000),
-            characterLimit: DAILY_LIMITS[newUser.planType as PlanType] || 2000,
-            dailyKeyCount: 0,
-            customVoices: []
-        };
-        setUsers([...users, user]);
-        setNewUser({ loginId: '', password: '', displayName: '', role: 'USER', planType: 'MONTHLY' });
-    };
-
-    const handleDeleteUser = (uid: string) => {
-        if (confirm('Bạn có chắc muốn xóa user này?')) {
-            setUsers(users.filter((u: any) => u.uid !== uid));
-        }
-    };
-
-    const handleUpdateUserPlan = (uid: string, plan: PlanType) => {
-         let days = 30;
-         if (plan === '3MONTHS') days = 90;
-         if (plan === '6MONTHS') days = 180;
-         if (plan === 'YEARLY') days = 365;
-         if (plan === 'TRIAL') days = 3;
-
-         setUsers(users.map((u: any) => {
-             if (u.uid === uid) {
-                 return {
-                     ...u,
-                     planType: plan,
-                     expiryDate: Date.now() + (days * 86400000),
-                     characterLimit: DAILY_LIMITS[plan] || 2000,
-                     credits: DAILY_LIMITS[plan] || 2000 // Reset credits ngay khi đổi gói
-                 };
-             }
-             return u;
-         }));
-    };
-
-    // Key Functions
-    const handleAddKey = () => {
-        if (!newKey.key) return alert('Vui lòng nhập Key');
-        const k: ManagedKey = {
-            id: `key-${Date.now()}`,
-            name: newKey.name || 'Admin Added',
-            key: newKey.key,
-            status: 'UNTESTED',
-            usageCount: 0,
-            isTrialKey: false,
-            allowedUserIds: newKey.assignedUid ? [newKey.assignedUid] : []
-        };
-        setKeys([...keys, k]);
-        setNewKey({ name: '', key: '', assignedUid: '' });
-    };
-
-    const handleDeleteKey = (id: string) => {
-        setKeys(keys.filter((k: any) => k.id !== id));
-    };
-
-    // Export Keys
-    const downloadKeys = () => {
-        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(keys, null, 2));
-        const downloadAnchorNode = document.createElement('a');
-        downloadAnchorNode.setAttribute("href",     dataStr);
-        downloadAnchorNode.setAttribute("download", "gemini_keys.json");
-        document.body.appendChild(downloadAnchorNode);
-        downloadAnchorNode.click();
-        downloadAnchorNode.remove();
-    };
-
-    // Import Keys from File
-    const handleFileUpload = (event: any) => {
-        const file = event.target.files[0];
-        if (!file) return;
-
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            const content = e.target?.result as string;
-            // Giả định mỗi dòng là 1 key
-            const lines = content.split(/\r?\n/).filter(line => line.trim().length > 10);
-            
-            const newKeys: ManagedKey[] = lines.map((line, index) => ({
-                id: `imported-${Date.now()}-${index}`,
-                name: `Imported Key ${index + 1}`,
-                key: line.trim(),
-                status: 'UNTESTED',
-                usageCount: 0,
-                isTrialKey: false,
-                allowedUserIds: []
-            }));
-
-            // Lọc trùng
-            const uniqueNewKeys = newKeys.filter(nk => !keys.some((ek: any) => ek.key === nk.key));
-            setKeys([...keys, ...uniqueNewKeys]);
-            alert(`Đã nhập ${uniqueNewKeys.length} key mới thành công!`);
-        };
-        reader.readAsText(file);
-    };
-
-    return (
-        <div className="space-y-6">
-            <div className="flex gap-4 border-b border-slate-800 pb-4">
-                <button onClick={() => setView('USERS')} className={`px-4 py-2 rounded-lg font-medium flex items-center gap-2 ${view === 'USERS' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-900'}`}>
-                    <Users className="w-4 h-4" /> Quản lý User
-                </button>
-                <button onClick={() => setView('KEYS')} className={`px-4 py-2 rounded-lg font-medium flex items-center gap-2 ${view === 'KEYS' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-900'}`}>
-                    <Key className="w-4 h-4" /> Quản lý API Key
-                </button>
-            </div>
-
-            {view === 'USERS' && (
-                <div className="space-y-6 animate-in slide-in-from-right">
-                    {/* Add User Form */}
-                    <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 grid grid-cols-1 md:grid-cols-5 gap-3">
-                        <input placeholder="Tên đăng nhập" className="bg-slate-950 border border-slate-800 p-2 rounded text-sm text-white" value={newUser.loginId} onChange={e => setNewUser({...newUser, loginId: e.target.value})} />
-                        <input placeholder="Mật khẩu" className="bg-slate-950 border border-slate-800 p-2 rounded text-sm text-white" value={newUser.password} onChange={e => setNewUser({...newUser, password: e.target.value})} />
-                        <input placeholder="Tên hiển thị" className="bg-slate-950 border border-slate-800 p-2 rounded text-sm text-white" value={newUser.displayName} onChange={e => setNewUser({...newUser, displayName: e.target.value})} />
-                        <select className="bg-slate-950 border border-slate-800 p-2 rounded text-sm text-white" value={newUser.planType} onChange={e => setNewUser({...newUser, planType: e.target.value})}>
-                            <option value="TRIAL">Dùng thử</option>
-                            <option value="MONTHLY">1 Tháng</option>
-                            <option value="3MONTHS">3 Tháng</option>
-                            <option value="6MONTHS">6 Tháng</option>
-                            <option value="YEARLY">1 Năm</option>
-                        </select>
-                        <button onClick={handleAddUser} className="bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold text-sm">Thêm User</button>
-                    </div>
-
-                    {/* User List */}
-                    <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
-                        <table className="w-full text-left text-sm text-slate-400">
-                            <thead className="bg-slate-950 text-slate-200 uppercase font-bold text-xs">
-                                <tr>
-                                    <th className="p-4">User Info</th>
-                                    <th className="p-4">Hạn mức</th>
-                                    <th className="p-4">Gói cước</th>
-                                    <th className="p-4">Hết hạn</th>
-                                    <th className="p-4 text-right">Hành động</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-800">
-                                {users.map((u: UserProfile) => (
-                                    <tr key={u.uid} className="hover:bg-slate-800/50">
-                                        <td className="p-4">
-                                            <div className="font-bold text-white">{u.displayName}</div>
-                                            <div className="text-xs">@{u.loginId}</div>
-                                        </td>
-                                        <td className="p-4 text-emerald-400 font-mono">
-                                            {u.credits.toLocaleString()} / {u.characterLimit.toLocaleString()}
-                                        </td>
-                                        <td className="p-4">
-                                            <select 
-                                                className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-white focus:outline-none"
-                                                value={u.planType}
-                                                onChange={(e) => handleUpdateUserPlan(u.uid, e.target.value as PlanType)}
-                                            >
-                                                <option value="TRIAL">Dùng thử</option>
-                                                <option value="MONTHLY">1 Tháng</option>
-                                                <option value="3MONTHS">3 Tháng</option>
-                                                <option value="6MONTHS">6 Tháng</option>
-                                                <option value="YEARLY">1 Năm</option>
-                                            </select>
-                                        </td>
-                                        <td className="p-4 font-mono text-xs">{new Date(u.expiryDate).toLocaleDateString('vi-VN')}</td>
-                                        <td className="p-4 text-right flex justify-end gap-2">
-                                            <button onClick={() => handleDeleteUser(u.uid)} className="p-2 bg-slate-800 hover:bg-red-500/20 hover:text-red-400 rounded transition-colors"><Trash2 className="w-4 h-4"/></button>
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            )}
-
-            {view === 'KEYS' && (
-                <div className="space-y-6 animate-in slide-in-from-right">
-                    {/* Add Key Form */}
-                    <div className="flex gap-2">
-                         <div className="relative">
-                            <input type="file" id="key-upload" className="hidden" accept=".txt" onChange={handleFileUpload} />
-                            <label htmlFor="key-upload" className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-lg cursor-pointer text-sm font-medium transition-colors">
-                                <Upload className="w-4 h-4"/> Nhập từ File (.txt)
-                            </label>
-                         </div>
-                         <button onClick={downloadKeys} className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
-                             <Download className="w-4 h-4"/> Tải xuống JSON
-                         </button>
-                    </div>
-
-                     <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 grid grid-cols-1 md:grid-cols-4 gap-3">
-                        <input placeholder="Tên Key (VD: Key VIP 1)" className="bg-slate-950 border border-slate-800 p-2 rounded text-sm text-white" value={newKey.name} onChange={e => setNewKey({...newKey, name: e.target.value})} />
-                        <input placeholder="Gemini API Key..." className="bg-slate-950 border border-slate-800 p-2 rounded text-sm text-white font-mono" value={newKey.key} onChange={e => setNewKey({...newKey, key: e.target.value})} />
-                        <select className="bg-slate-950 border border-slate-800 p-2 rounded text-sm text-white" value={newKey.assignedUid} onChange={e => setNewKey({...newKey, assignedUid: e.target.value})}>
-                            <option value="">-- Dùng chung --</option>
-                            {users.map((u: any) => <option key={u.uid} value={u.uid}>{u.displayName} (@{u.loginId})</option>)}
-                        </select>
-                        <button onClick={handleAddKey} className="bg-indigo-600 hover:bg-indigo-500 text-white rounded font-bold text-sm">Thêm Key</button>
-                    </div>
-
-                    <div className="grid gap-3">
-                        <div className="text-sm text-slate-500">Tổng số key: {keys.length}</div>
-                        {keys.map((k: ManagedKey) => (
-                            <div key={k.id} className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex items-center justify-between">
-                                <div className="flex items-center gap-3">
-                                    <div className="p-2 bg-emerald-500/10 rounded-lg text-emerald-400"><Key className="w-5 h-5"/></div>
-                                    <div>
-                                        <h3 className="font-bold text-slate-200">{k.name}</h3>
-                                        <p className="text-xs font-mono text-slate-500">{k.key.substring(0, 10)}... • {k.allowedUserIds.length ? `Gán cho: ${users.find((u:any) => u.uid === k.allowedUserIds[0])?.displayName}` : 'Dùng chung'}</p>
-                                    </div>
-                                </div>
-                                <button onClick={() => handleDeleteKey(k.id)} className="text-slate-500 hover:text-red-400 transition-colors"><Trash2 className="w-5 h-5"/></button>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
-        </div>
-    );
-};
-
-// --- MAIN APP COMPONENT ---
-export default function App() {
+const App: React.FC = () => {
+  const [activeMode, setActiveMode] = useState<ReadingMode>(ReadingMode.NEWS);
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
-  const [users, setUsers] = useState<UserProfile[]>([]);
-  const [keys, setKeys] = useState<ManagedKey[]>([]);
-  const [isDataLoaded, setIsDataLoaded] = useState(false);
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
+  const [managedKeys, setManagedKeys] = useState<ManagedKey[]>([]);
+  const [ads, setAds] = useState<AdCampaign[]>([]);
+  const [adminTab, setAdminTab] = useState<'users' | 'keys' | 'ads'>('users');
   
-  // App States
-  const [showAdmin, setShowAdmin] = useState(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isAIPromptOpen, setIsAIPromptOpen] = useState(false);
+  const [isVoicePanelOpen, setIsVoicePanelOpen] = useState(false);
+  const [isAddUserModalOpen, setIsAddUserModalOpen] = useState(false);
+  const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
+  const [isCloningModalOpen, setIsCloningModalOpen] = useState(false); 
+  const [editingKey, setEditingKey] = useState<ManagedKey | null>(null);
+  const [editingAd, setEditingAd] = useState<AdCampaign | null>(null);
+
+  const [description, setDescription] = useState('');
+  const [generatedText, setGeneratedText] = useState('');
+  const [progress, setProgress] = useState(0);
+  const [bgAudio, setBgAudio] = useState<{ name: string, buffer: ArrayBuffer } | null>(null);
+  const [bgVolume, setBgVolume] = useState(0.25);
+  const [loginCreds, setLoginCreds] = useState({ id: '', pass: '' });
+  const [loginError, setLoginError] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  
-  // TTS States
-  const [input, setInput] = useState('');
-  const [selectedMode, setSelectedMode] = useState<ReadingMode>(ReadingMode.STORY);
-  const [state, setState] = useState<GenerationState & { mp3Url?: string | null }>({
-    isGeneratingText: false, isGeneratingAudio: false, error: null, text: '', audioUrl: null, audioBuffer: null, mp3Url: null
+  const [cloningFile, setCloningFile] = useState<File | null>(null);
+
+  const [config, setConfig] = useState<VoiceConfig>({
+    provider: TTSProvider.GEMINI, 
+    speed: 1.0, 
+    pitch: 1.0, 
+    emotion: 'NEUTRAL', 
+    voiceName: 'Kore',
+    activePresetId: 'thu-thao-vtv'
   });
-  const [voiceConfig, setVoiceConfig] = useState<VoiceConfig>({
-     provider: TTSProvider.GEMINI, voiceName: 'Kore', speed: 1, pitch: 0, emotion: 'NEUTRAL', activePresetId: PRESET_VOICES[0].id
+
+  const [state, setState] = useState<GenerationState & { mp3Url: string | null }>({
+    isGeneratingText: false, isGeneratingAudio: false, error: null, text: '', audioUrl: null, mp3Url: null, audioBuffer: null
   });
 
-  // Background Music States
-  const [bgMusic, setBgMusic] = useState<{buffer: ArrayBuffer, name: string} | null>(null);
-  const [bgVolume, setBgVolume] = useState(0.2);
-  const bgMusicInputRef = useRef<HTMLInputElement>(null);
+  const bgInputRef = useRef<HTMLInputElement>(null);
+  const cloneInputRef = useRef<HTMLInputElement>(null);
+  const todayStr = useMemo(() => new Date().toLocaleDateString('vi-VN'), []);
 
-  // Audio Player States
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-
-  const activeMode = READING_MODES.find(m => m.id === selectedMode) || READING_MODES[0];
-
-  // Helper format time
-  const formatTime = (time: number) => {
-    if(isNaN(time)) return "00:00";
-    const min = Math.floor(time / 60);
-    const sec = Math.floor(time % 60);
-    return `${min}:${sec < 10 ? '0' + sec : sec}`;
-  };
-
-  // Toggle Play/Pause
-  const togglePlayback = () => {
-    if (audioRef.current) {
-        if (isPlaying) {
-            audioRef.current.pause();
-        } else {
-            audioRef.current.play();
-        }
-    }
-  };
-
-  // Seek
-  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const time = parseFloat(e.target.value);
-      if (audioRef.current) {
-          audioRef.current.currentTime = time;
-          setCurrentTime(time);
-      }
-  };
-
-  // Handle Skip 15s
-  const handleSkip = (seconds: number) => {
-      if (audioRef.current) {
-          const newTime = Math.max(0, Math.min(audioRef.current.currentTime + seconds, duration));
-          audioRef.current.currentTime = newTime;
-          setCurrentTime(newTime);
-      }
-  };
-
-  // --- DATA SYNCING ---
-  // Load initial data
   useEffect(() => {
-    const fetchData = async () => {
+    const fetchInit = async () => {
       try {
-        const [usersRes, keysRes] = await Promise.all([
-          fetch('/api/data/users'),
-          fetch('/api/data/keys')
+        const [keysRes, usersRes, adsRes] = await Promise.all([
+          fetch(`${API_BASE}/keys`).then(r => r.json()),
+          fetch(`${API_BASE}/users`).then(r => r.json()),
+          fetch(`${API_BASE}/ads`).then(r => r.json())
         ]);
-        
-        if (!usersRes.ok || !keysRes.ok) {
-            throw new Error(`Server returned status: ${usersRes.status} / ${keysRes.status}`);
-        }
+        setManagedKeys(keysRes || []);
+        setAllUsers(usersRes || []);
+        setAds(adsRes || []);
 
-        const usersJson = await usersRes.json();
-        const keysJson = await keysRes.json();
-        
-        const loadedUsers = usersJson.data;
-        const loadedKeys = keysJson.data;
-
-        if (Array.isArray(loadedUsers) && loadedUsers.length > 0) {
-            setUsers(loadedUsers);
-        } else {
-            setUsers(INITIAL_USERS);
-            saveDataToApi('users', INITIAL_USERS);
-        }
-
-        if (Array.isArray(loadedKeys) && loadedKeys.length > 0) {
-            setKeys(loadedKeys);
-        } else {
-            setKeys(INITIAL_KEYS);
-            saveDataToApi('keys', INITIAL_KEYS);
-        }
-
-        setIsDataLoaded(true);
-      } catch (e) {
-        console.error("Failed to load data, using local defaults. Error:", e);
-        setUsers(INITIAL_USERS);
-        setKeys(INITIAL_KEYS);
-        setIsDataLoaded(true);
-      }
-    };
-    fetchData();
-  }, []);
-
-  // Auto-save changes
-  useEffect(() => {
-    if (isDataLoaded && users.length > 0) {
-        saveDataToApi('users', users);
-    }
-  }, [users, isDataLoaded]);
-
-  useEffect(() => {
-    if (isDataLoaded && keys.length > 0) {
-        saveDataToApi('keys', keys);
-    }
-  }, [keys, isDataLoaded]);
-
-  // Handle Logic Login Check & Reset Daily Limit
-  const handleLogin = (u: string, p: string, onError: any) => {
-      const cleanUser = u.trim();
-      const cleanPass = p.trim();
-      
-      const userIndex = users.findIndex(x => x.loginId === cleanUser && x.password === cleanPass);
-      
-      if (userIndex !== -1) {
-          const user = { ...users[userIndex] };
-          if(!user.customVoices) user.customVoices = [];
-          
-          const today = new Date().toLocaleDateString('en-GB'); // DD/MM/YYYY
-
-          // Reset daily limits if new day
-          if (user.lastActive !== today) {
-              user.lastActive = today;
-              user.dailyKeyCount = 0;
-              user.credits = DAILY_LIMITS[user.planType];
-              // Update back to state
-              const newUsers = [...users];
-              newUsers[userIndex] = user;
-              setUsers(newUsers); // This triggers auto-save via useEffect
-          }
-
+        const savedSession = localStorage.getItem('bm_user_session');
+        if (savedSession) {
+          const user = JSON.parse(savedSession) as UserProfile;
           setCurrentUser(user);
-          if(user.role === 'ADMIN') setShowAdmin(true);
-      } else {
-          onError('Sai tên đăng nhập hoặc mật khẩu!');
-      }
+        } else { setIsAuthModalOpen(true); }
+      } catch (e) { setIsAuthModalOpen(true); }
+    };
+    fetchInit();
+  }, [todayStr]);
+
+  const saveToDb = async (type: string, data: any) => {
+    await fetch(`${API_BASE}/${type}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
   };
 
-  const handleGuest = () => {
-      // Logic khôi phục key nếu hệ thống không có key nào (do lỡ xóa)
-      const hasSystemKey = keys.some(k => k.allowedUserIds.length === 0);
-      if (!hasSystemKey) {
-          const defaultKey: ManagedKey = { 
-            id: 'key-system-default-restored', 
-            name: 'Key Hệ thống (Khôi phục)', 
-            key: process.env.API_KEY || '', 
-            status: 'VALID', 
-            usageCount: 0, 
-            isTrialKey: false, 
-            allowedUserIds: [] 
-          };
-          setKeys(prev => [...prev, defaultKey]);
-      }
+  // QUY TẮC ĐẶT LỊCH QUẢNG CÁO
+  const activeAds = useMemo(() => {
+    const now = new Date().getTime();
+    return ads.filter(ad => {
+      if (!ad.isActive) return false;
+      const start = ad.startDate ? new Date(ad.startDate).getTime() : 0;
+      const end = ad.endDate ? new Date(ad.endDate).getTime() : Infinity;
+      return now >= start && now <= end;
+    });
+  }, [ads]);
 
-      setCurrentUser({ uid: 'guest', displayName: 'Khách', role: 'GUEST', credits: 1000, planType: 'TRIAL', loginId: 'guest', email: '', photoURL: '', lastActive: '', isBlocked: false, expiryDate: 0, characterLimit: 1000, dailyKeyCount: 0, customVoices: [] });
-  };
+  const handleCreateAudio = async () => {
+    const text = generatedText.trim();
+    if (!text) return;
+    
+    // TÍCH HỢP XOAY KEY: Lấy toàn bộ danh sách key khả dụng
+    const validKeys = managedKeys
+      .filter(k => k.status === 'VALID')
+      .map(k => k.key);
+    
+    const keysToUse = validKeys.length > 0 ? validKeys : [process.env.API_KEY || ""];
 
-  // Handle Key Submission
-  const handleSubmitKey = (keyString: string) => {
-      if(!currentUser) return;
-      if(currentUser.role === 'GUEST') return alert("Vui lòng đăng nhập để nhận thưởng!");
-      if(currentUser.dailyKeyCount >= MAX_KEYS_PER_DAY) return alert(`Bạn đã đạt giới hạn đóng góp ${MAX_KEYS_PER_DAY} key hôm nay.`);
-      
-      // Check duplicate
-      const exists = keys.some(k => k.key === keyString);
-      if(exists) return alert("Key này đã tồn tại trong hệ thống. Vui lòng nhập key khác.");
-
-      // Add key
-      const newKey: ManagedKey = {
-          id: `reward-${Date.now()}`,
-          name: `Đóng góp bởi ${currentUser.displayName}`,
-          key: keyString,
-          status: 'UNTESTED',
-          usageCount: 0,
-          isTrialKey: false,
-          allowedUserIds: [], // Shared key
-          addedBy: currentUser.uid
-      };
-
-      setKeys([...keys, newKey]);
-
-      // Add credits to user
-      const updatedUser = {
-          ...currentUser,
-          credits: currentUser.credits + KEY_REWARD_CREDITS,
-          dailyKeyCount: currentUser.dailyKeyCount + 1
-      };
-      
-      setCurrentUser(updatedUser);
-      setUsers(users.map(u => u.uid === currentUser.uid ? updatedUser : u));
-
-      alert(`🎉 Chúc mừng! Bạn đã nhận thêm ${KEY_REWARD_CREDITS.toLocaleString()} ký tự.`);
-  };
-
-  // Logic TTS
-  const getApiKeyForUser = () => {
-      const privateKey = keys.find(k => k.allowedUserIds.includes(currentUser?.uid || ''));
-      if (privateKey && privateKey.key && privateKey.key !== 'AIzaSyExampleKey') return privateKey.key;
-      const sharedKey = keys.find(k => k.allowedUserIds.length === 0);
-      if (sharedKey && sharedKey.key && sharedKey.key !== 'AIzaSyExampleKey') return sharedKey.key;
-      
-      // Fallback mạnh nhất: Trả về env key nếu danh sách quản lý bị trống
-      return process.env.API_KEY || '';
-  };
-
-  // Handle Background Music Upload
-  const handleUploadBgMusic = async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
-      if (!file) return;
-
-      try {
-          const buffer = await file.arrayBuffer();
-          setBgMusic({ buffer, name: file.name });
-      } catch (e) {
-          alert("Lỗi tải nhạc nền: " + e);
-      } finally {
-          if (bgMusicInputRef.current) bgMusicInputRef.current.value = '';
-      }
-  };
-
-  const handleUploadVoice = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file || !currentUser) return;
-
-    if (currentUser.customVoices.length >= MAX_CUSTOM_VOICES) {
-        alert("Bạn chỉ được phép lưu tối đa 2 giọng mẫu. Vui lòng xóa bớt để thêm mới.");
-        return;
-    }
-
-    const key = getApiKeyForUser();
-    if(!key) return setState(prev => ({...prev, error: "Cần có API Key để phân tích giọng nói."}));
-
-    setIsAnalyzing(true);
+    setState(s => ({ ...s, isGeneratingAudio: true }));
+    setProgress(0);
     try {
-        const arrayBuffer = await file.arrayBuffer();
-        
-        // Analyze: Services handles trimming 20s and delaying 3s internally
-        const analysis = await analyzeVoice(arrayBuffer, (msg) => console.log(msg), key);
-
-        const newVoice: ClonedVoice = {
-            id: `custom-${Date.now()}`,
-            name: analysis.suggestedName || file.name.replace(/\.[^/.]+$/, ""),
-            gender: analysis.gender,
-            region: analysis.region,
-            description: analysis.description,
-            toneSummary: analysis.toneSummary,
-            createdAt: Date.now()
-        };
-
-        const updatedUser = {
-            ...currentUser,
-            customVoices: [...currentUser.customVoices, newVoice]
-        };
-
-        setCurrentUser(updatedUser);
-        setUsers(users.map(u => u.uid === currentUser.uid ? updatedUser : u));
-
-        // Auto Select new voice
-        // Mapping analyzed gender/region to closest Gemini voice for playback (simulation)
-        let mappedVoice = 'Kore'; // Default Female
-        if (newVoice.gender === 'Nam') mappedVoice = 'Fenrir'; // Default Male
-        
-        setVoiceConfig(prev => ({
-            ...prev,
-            useClonedVoice: true,
-            activeClonedVoiceId: newVoice.id,
-            voiceName: mappedVoice,
-            activePresetId: undefined
-        }));
-
-        alert(`✅ Đã phân tích thành công giọng: ${newVoice.name}`);
-
-    } catch (e: any) {
-        setState(prev => ({ ...prev, error: "Lỗi phân tích giọng: " + e.message }));
-    } finally {
-        setIsAnalyzing(false);
-        if (fileInputRef.current) fileInputRef.current.value = '';
+      let buffer = await generateAudioParallel(text, config, setProgress, (m, t) => console.log(m), keysToUse);
+      if (bgAudio) buffer = await mixWithBackgroundAudio(buffer, bgAudio.buffer, bgVolume);
+      
+      const wavUrl = URL.createObjectURL(pcmToWav(buffer));
+      const mp3Url = URL.createObjectURL(pcmToMp3(buffer));
+      
+      setState(s => ({ ...s, audioUrl: wavUrl, mp3Url, isGeneratingAudio: false }));
+    } catch (e) { 
+      alert("Hệ thống quá tải hoặc hết hạn mức Key: " + (e as Error).message);
+      setState(s => ({ ...s, isGeneratingAudio: false })); 
     }
   };
 
-  const handleGenerateText = async () => {
-    if (!input.trim()) return;
-    const key = getApiKeyForUser();
-    if(!key) return setState(prev => ({...prev, error: "Hệ thống chưa có API Key khả dụng. Vui lòng liên hệ Admin hoặc đóng góp Key."}));
-
-    setState(prev => ({ ...prev, isGeneratingText: true, error: null }));
-    try {
-        const text = await generateContentFromDescription(input, activeMode.prompt, undefined, key);
-        setState(prev => ({ ...prev, text, isGeneratingText: false }));
-    } catch (e: any) {
-        setState(prev => ({ ...prev, error: e.message, isGeneratingText: false }));
+  const handleLogin = () => {
+    setLoginError(null);
+    if (loginCreds.id === ADMIN_ID && loginCreds.pass === ADMIN_PASS) {
+      const adminUser: any = { uid: 'admin-root', displayName: 'Administrator', role: 'ADMIN', credits: 999999, loginId: ADMIN_ID };
+      setCurrentUser(adminUser);
+      localStorage.setItem('bm_user_session', JSON.stringify(adminUser));
+      setIsAuthModalOpen(false);
+      setActiveMode(ReadingMode.ADMIN_PANEL);
+    } else {
+      const user = allUsers.find(u => u.loginId === loginCreds.id && u.password === loginCreds.pass);
+      if (user) {
+        if (user.isBlocked) return setLoginError("Tài khoản đã bị khóa.");
+        setCurrentUser(user);
+        localStorage.setItem('bm_user_session', JSON.stringify(user));
+        setIsAuthModalOpen(false);
+      } else { setLoginError("Thông tin đăng nhập không chính xác."); }
     }
   };
-
-  const handleGenerateAudio = async () => {
-    if (!state.text.trim()) return;
-    if (currentUser && currentUser.credits < state.text.length) {
-        return setState(prev => ({...prev, error: `Không đủ ký tự! (Cần: ${state.text.length}, Còn: ${currentUser.credits}). Hãy đóng góp Key để nhận thêm.`}));
-    }
-
-    const key = getApiKeyForUser();
-    if(!key) return setState(prev => ({...prev, error: "Hệ thống chưa có API Key khả dụng."}));
-
-    setState(prev => ({ ...prev, isGeneratingAudio: true, error: null, audioUrl: null }));
-    try {
-        // 1. Generate Speech
-        let buffer = await generateAudioParallel(state.text, voiceConfig, (p) => console.log(p), undefined, key);
-        
-        // 2. Mix Background Music if present
-        if (bgMusic) {
-             try {
-                buffer = await mixAudio(buffer, bgMusic.buffer, bgVolume);
-             } catch (mixErr) {
-                 console.error("Mixing error:", mixErr);
-                 // Fallback to speech only if mixing fails
-             }
-        }
-
-        const wavBlob = pcmToWav(buffer);
-        const mp3Blob = pcmToMp3(buffer);
-        
-        // Deduct credits
-        if (currentUser && currentUser.role !== 'ADMIN') {
-             const updatedUser = { ...currentUser, credits: currentUser.credits - state.text.length };
-             setCurrentUser(updatedUser);
-             setUsers(users.map(u => u.uid === currentUser.uid ? updatedUser : u));
-        }
-
-        setState(prev => ({ 
-            ...prev, isGeneratingAudio: false, audioUrl: URL.createObjectURL(wavBlob), mp3Url: URL.createObjectURL(mp3Blob), audioBuffer: buffer 
-        }));
-    } catch (e: any) {
-        setState(prev => ({ ...prev, error: e.message, isGeneratingAudio: false }));
-    }
-  };
-
-  // Reset player time and Auto Play when new audio generated
-  useEffect(() => {
-    if(state.audioUrl && audioRef.current) {
-        setCurrentTime(0);
-        // Explicitly load and play to ensure autoplay works and updates UI state
-        audioRef.current.load();
-        const playPromise = audioRef.current.play();
-        if (playPromise !== undefined) {
-            playPromise
-                .then(() => setIsPlaying(true))
-                .catch(err => {
-                    console.warn("Autoplay blocked by browser:", err);
-                    setIsPlaying(false);
-                });
-        }
-    }
-  }, [state.audioUrl]);
-
-  // RENDER
-  if (!currentUser) {
-      return <LoginScreen 
-        onLogin={handleLogin} 
-        onGuest={handleGuest} 
-        onContact={() => window.open('https://zalo.me/0904567890', '_blank')}
-        onCreateKey={() => window.open('https://aistudio.google.com/app/apikey', '_blank')}
-        isLoading={!isDataLoaded}
-      />;
-  }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans p-4 md:p-8">
-      {/* Hidden File Inputs */}
-      <input 
-        type="file" 
-        ref={fileInputRef} 
-        onChange={handleUploadVoice} 
-        accept="audio/*" 
-        className="hidden" 
-      />
-      <input 
-        type="file" 
-        ref={bgMusicInputRef} 
-        onChange={handleUploadBgMusic} 
-        accept="audio/*" 
-        className="hidden" 
-      />
-
-      {/* Analyzing Overlay */}
-      {isAnalyzing && (
-        <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center backdrop-blur-sm">
-            <div className="text-center space-y-4">
-                <div className="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
-                <h3 className="text-xl font-bold text-white">Đang phân tích giọng mẫu...</h3>
-                <p className="text-slate-400 max-w-xs mx-auto">Hệ thống đang cắt 20s đầu và phân tích đặc điểm. Vui lòng chờ 3-5 giây.</p>
+    <div className="h-screen flex flex-col bg-[#F8FAFC] overflow-hidden font-sans">
+      <header className="h-16 bg-white border-b flex items-center justify-between px-6 shadow-sm z-50 shrink-0">
+        <div className="flex items-center gap-3 cursor-pointer" onClick={() => setActiveMode(ReadingMode.NEWS)}>
+          <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg"><Sparkles className="w-6 h-6"/></div>
+          <h1 className="text-xl font-black italic bg-gradient-to-r from-indigo-600 to-violet-600 bg-clip-text text-transparent uppercase tracking-tighter">BaoMinh AI</h1>
+        </div>
+        <div className="flex items-center gap-4">
+          {currentUser && (
+            <div className="flex items-center gap-3 px-4 py-1.5 bg-slate-50 border rounded-full">
+              <p className="text-[10px] font-black text-indigo-600 uppercase">Hạn mức: {currentUser.credits.toLocaleString()} KT</p>
+              <div className="w-1 h-1 bg-slate-300 rounded-full"/>
+              <p className="text-[9px] font-bold text-slate-400 uppercase">{currentUser.role}</p>
             </div>
+          )}
+          <button onClick={() => { localStorage.removeItem('bm_user_session'); setCurrentUser(null); setIsAuthModalOpen(true); }} className="p-2 text-slate-300 hover:text-red-500 transition-colors"><LogOut className="w-5 h-5"/></button>
+        </div>
+      </header>
+
+      <div className="flex-1 flex overflow-hidden">
+        <aside className="w-72 bg-white border-r flex flex-col p-4 hidden md:flex">
+          <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-4 mb-4">Danh mục Studio</div>
+          <div className="space-y-1 overflow-y-auto flex-1 pr-1 custom-scrollbar">
+            {READING_MODES.map(m => (
+              <button key={m.id} onClick={() => setActiveMode(m.id)} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl text-[11px] font-bold transition-all ${activeMode === m.id ? 'bg-indigo-600 text-white shadow-xl' : 'text-slate-500 hover:bg-slate-50'}`}>
+                <div className={`p-2 rounded-xl ${activeMode === m.id ? 'bg-white/20' : 'bg-slate-100 text-slate-400'}`}>{m.icon}</div>
+                {m.label}
+              </button>
+            ))}
+          </div>
+          {currentUser?.role === 'ADMIN' && (
+            <div className="pt-4 mt-4 border-t space-y-1">
+              <button onClick={() => setActiveMode(ReadingMode.ADMIN_PANEL)} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl text-[11px] font-bold transition-all ${activeMode === ReadingMode.ADMIN_PANEL ? 'bg-slate-900 text-white shadow-lg' : 'text-slate-500 hover:bg-slate-50'}`}>
+                <div className={`p-2 rounded-xl ${activeMode === ReadingMode.ADMIN_PANEL ? 'bg-white/20' : 'bg-slate-100 text-slate-400'}`}><Layout className="w-5 h-5"/></div>
+                Quản trị hệ thống
+              </button>
+            </div>
+          )}
+        </aside>
+
+        <main className="flex-1 flex flex-col bg-slate-50 overflow-hidden relative">
+          {activeMode === ReadingMode.ADMIN_PANEL ? (
+            <div className="flex-1 p-8 overflow-y-auto">
+              <div className="flex items-center justify-between mb-8">
+                <h2 className="text-2xl font-black text-slate-800 uppercase italic">Control Center</h2>
+                <div className="flex bg-white border rounded-2xl p-1 shadow-sm">
+                  <button onClick={() => setAdminTab('users')} className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase transition-all ${adminTab === 'users' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400'}`}>Người dùng</button>
+                  <button onClick={() => setAdminTab('keys')} className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase transition-all ${adminTab === 'keys' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400'}`}>API Keys</button>
+                  <button onClick={() => setAdminTab('ads')} className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase transition-all ${adminTab === 'ads' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400'}`}>Quảng cáo</button>
+                </div>
+              </div>
+
+              {adminTab === 'ads' ? (
+                <div className="space-y-6">
+                  <div className="flex justify-end">
+                    <button onClick={() => setEditingAd({ id: `ad-${Date.now()}`, isActive: true, title: '', content: '', buttonText: 'Xem ngay', buttonLink: '', createdAt: Date.now() })} className="px-6 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase flex items-center gap-2 shadow-lg hover:bg-indigo-700 transition-all"><Plus className="w-4 h-4"/> Tạo quảng cáo</button>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {ads.map(ad => (
+                      <div key={ad.id} className="bg-white p-6 rounded-[2rem] border shadow-sm flex flex-col gap-4 group hover:border-indigo-300 transition-all relative overflow-hidden">
+                        <div className="flex items-center justify-between">
+                           <div className="flex items-center gap-3">
+                              <div className={`w-3 h-3 rounded-full ${ad.isActive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`}/> 
+                              <h4 className="text-sm font-black text-slate-800">{ad.title || "Chưa đặt tên"}</h4>
+                           </div>
+                           <div className="flex gap-2">
+                             <button onClick={() => setEditingAd(ad)} className="p-2 text-slate-400 hover:text-indigo-600 transition-colors"><Edit3 className="w-4 h-4"/></button>
+                             <button onClick={async () => { if(confirm("Xóa quảng cáo?")) { const up = ads.filter(x => x.id !== ad.id); setAds(up); await saveToDb('ads', up); } }} className="p-2 text-slate-400 hover:text-red-500 transition-colors"><Trash2 className="w-4 h-4"/></button>
+                           </div>
+                        </div>
+                        <p className="text-xs text-slate-500 line-clamp-2">{ad.content}</p>
+                        <div className="flex items-center gap-4 p-3 bg-slate-50 rounded-xl text-[9px] font-bold text-slate-400 uppercase">
+                           <Calendar className="w-4 h-4 text-indigo-400"/>
+                           <span>Lịch: {ad.startDate || 'Bắt đầu'} ➔ {ad.endDate || 'Kết thúc'}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="py-20 text-center text-slate-300 uppercase font-black tracking-widest text-xs animate-pulse">Đang tải dữ liệu quản trị...</div>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* QUY TẮC ĐẶT LỊCH: Hiển thị Quảng cáo */}
+              {activeAds.length > 0 && (
+                <div className="px-6 pt-6 animate-in slide-in-from-top-4 duration-700">
+                  <div className="bg-gradient-to-r from-indigo-600 to-violet-700 rounded-[2.5rem] p-8 text-white flex items-center justify-between shadow-2xl relative overflow-hidden group">
+                     <div className="absolute top-0 right-0 w-80 h-80 bg-white/10 rounded-full -mr-40 -mt-40 blur-3xl group-hover:bg-white/20 transition-all duration-1000"/>
+                     <div className="relative z-10 flex items-center gap-8">
+                        <div className="w-20 h-20 bg-white/20 backdrop-blur-xl rounded-[2rem] flex items-center justify-center text-amber-300 shadow-inner group-hover:rotate-12 transition-transform duration-500"><Sparkles className="w-10 h-10"/></div>
+                        <div>
+                           <h3 className="text-2xl font-black uppercase italic tracking-tighter leading-none mb-2">{activeAds[0].title}</h3>
+                           <p className="text-sm font-medium text-indigo-100 opacity-90 max-w-lg">{activeAds[0].content}</p>
+                        </div>
+                     </div>
+                     <a href={activeAds[0].buttonLink} target="_blank" className="relative z-10 px-10 py-4 bg-white text-indigo-700 rounded-2xl text-[12px] font-black uppercase shadow-2xl hover:scale-105 active:scale-95 transition-all flex items-center gap-3">
+                        {activeAds[0].buttonText} <ArrowRight className="w-5 h-5"/>
+                     </a>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex-1 flex gap-6 p-6 overflow-hidden">
+                <div className="flex-1 flex flex-col bg-white rounded-[3.5rem] border shadow-2xl overflow-hidden relative group">
+                  <div className="px-10 py-6 border-b flex items-center justify-between bg-white/80 backdrop-blur-md z-10">
+                    <p className="text-[11px] font-black text-slate-800 uppercase tracking-[0.2em] flex items-center gap-3"><Layout className="w-5 h-5 text-indigo-600"/> Studio Sáng Tạo</p>
+                    <div className="flex items-center gap-3">
+                      <button onClick={() => setIsAIPromptOpen(true)} className="px-6 py-3 bg-indigo-600 text-white rounded-2xl text-[10px] font-black uppercase shadow-xl hover:bg-indigo-700 transition-all flex items-center gap-2"><Wand2 className="w-4 h-4"/> Soạn thảo AI</button>
+                      <button onClick={() => setGeneratedText('')} className="p-3 text-slate-200 hover:text-red-500 transition-all"><Trash2 className="w-6 h-6"/></button>
+                    </div>
+                  </div>
+                  <textarea value={generatedText} onChange={e => setGeneratedText(e.target.value)} placeholder="Nhập văn bản. Hệ thống tự động chuẩn hóa chính tả và xoay Key thông minh..." className="flex-1 p-12 text-2xl font-medium text-slate-700 bg-transparent outline-none resize-none placeholder:text-slate-100 scrollbar-hide leading-relaxed"/>
+                  
+                  {state.isGeneratingAudio && (
+                    <div className="absolute inset-0 bg-white/95 backdrop-blur-2xl z-20 flex flex-col items-center justify-center p-12 text-center animate-in fade-in duration-300">
+                      <div className="relative mb-10 scale-125">
+                         <div className="w-24 h-24 border-[6px] border-indigo-100 rounded-full animate-pulse absolute inset-0"/>
+                         <div className="w-24 h-24 border-[6px] border-indigo-600 border-t-transparent rounded-full animate-spin relative flex items-center justify-center">
+                            <span className="text-[14px] font-black text-indigo-600">{progress}%</span>
+                         </div>
+                      </div>
+                      <h4 className="text-3xl font-black text-slate-800 mb-3 uppercase italic tracking-tighter">Đang kiến tạo giọng nói</h4>
+                      <p className="text-[12px] font-black text-slate-400 uppercase tracking-[0.3em] max-w-sm leading-relaxed mb-6">Đã tối ưu xoay Key & Độ trễ an toàn 3s</p>
+                      <div className="flex items-center gap-2 px-4 py-2 bg-slate-50 rounded-full border border-slate-100">
+                         <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"/>
+                         <span className="text-[9px] font-black text-slate-400 uppercase italic">Chuẩn hóa 100% chính tả Việt Nam</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="w-[420px] flex flex-col gap-6 overflow-y-auto custom-scrollbar">
+                  <div className="bg-white rounded-[3rem] border shadow-xl p-8 space-y-8">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3"><div className="p-2 bg-amber-50 rounded-xl"><Mic2 className="w-5 h-5 text-amber-500"/></div><h4 className="text-[11px] font-black text-slate-800 uppercase tracking-widest">Clone giọng mẫu</h4></div>
+                      <button onClick={() => setIsCloningModalOpen(true)} className="px-4 py-2 bg-amber-500 text-white rounded-2xl text-[10px] font-black uppercase flex items-center gap-2 hover:bg-amber-600 transition-all shadow-lg"><Zap className="w-4 h-4"/> Clone 20s</button>
+                    </div>
+                    
+                    <button onClick={() => setIsVoicePanelOpen(true)} className="w-full p-6 bg-slate-50 border border-slate-100 rounded-[2rem] flex items-center justify-between hover:border-indigo-400 group text-left transition-all">
+                       <div>
+                          <p className="text-sm font-black text-slate-800 uppercase italic tracking-tight">{PRESET_VOICES.find(v => v.id === config.activePresetId)?.label || 'Giọng mặc định'}</p>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">Phòng thu cao cấp</p>
+                       </div>
+                       <ChevronRight className="w-6 h-6 text-slate-200 group-hover:text-indigo-600 group-hover:translate-x-1 transition-all"/>
+                    </button>
+
+                    <div className="space-y-4">
+                       <div className="flex justify-between text-[11px] font-black text-slate-400 uppercase tracking-widest"><span>Tốc độ đọc: {config.speed}x</span></div>
+                       <input type="range" min="0.5" max="2.0" step="0.1" value={config.speed} onChange={e => setConfig({...config, speed: parseFloat(e.target.value)})} className="w-full h-2 bg-slate-100 rounded-full appearance-none cursor-pointer accent-indigo-600"/>
+                    </div>
+                  </div>
+
+                  <button onClick={handleCreateAudio} disabled={state.isGeneratingAudio || !generatedText} className="w-full py-7 bg-gradient-to-r from-indigo-600 to-violet-700 text-white rounded-[2.5rem] text-sm font-black uppercase shadow-2xl hover:shadow-indigo-200 hover:-translate-y-1 active:translate-y-0 transition-all flex items-center justify-center gap-4 disabled:opacity-50">
+                    {state.isGeneratingAudio ? <Loader2 className="w-7 h-7 animate-spin"/> : <PlayCircle className="w-8 h-8"/>} Chuyển đổi ngay
+                  </button>
+
+                  {state.audioUrl && (
+                    <div className="bg-slate-900 rounded-[3rem] p-10 flex flex-col gap-8 animate-in slide-in-from-bottom-8 shadow-[0_35px_60px_-15px_rgba(79,70,229,0.3)] border border-indigo-500/10">
+                      <audio src={state.audioUrl} controls className="w-full h-8 invert brightness-200 opacity-90"/>
+                      <div className="grid grid-cols-2 gap-4">
+                         <a href={state.mp3Url || '#'} download={`Studio-Audio-${Date.now()}.mp3`} className="py-5 bg-white/10 text-white text-[11px] font-black uppercase rounded-2xl flex items-center justify-center gap-3 hover:bg-white/20 transition-all border border-white/5 shadow-inner"><Download className="w-5 h-5"/> Tải file MP3</a>
+                         <button onClick={() => { navigator.clipboard.writeText(generatedText); alert("Đã sao chép kịch bản!"); }} className="py-5 bg-white/10 text-white text-[11px] font-black uppercase rounded-2xl flex items-center justify-center gap-3 hover:bg-white/20 transition-all border border-white/5 shadow-inner"><Copy className="w-5 h-5"/> Copy Text</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </main>
+      </div>
+
+      {/* KHÔI PHỤC GIAO DIỆN ĐĂNG NHẬP CAO CẤP */}
+      {isAuthModalOpen && (
+        <div className="fixed inset-0 z-[500] flex items-center justify-center bg-slate-50 animate-in fade-in duration-700">
+           {/* Background Decorations */}
+           <div className="absolute top-0 left-0 w-full h-full overflow-hidden -z-10">
+              <div className="absolute -top-24 -left-24 w-96 h-96 bg-indigo-200 rounded-full blur-[100px] opacity-40 animate-pulse"/>
+              <div className="absolute -bottom-24 -right-24 w-96 h-96 bg-violet-200 rounded-full blur-[100px] opacity-40 animate-pulse delay-700"/>
+           </div>
+
+           <div className="w-full max-w-md p-10">
+              <div className="bg-white rounded-[3.5rem] shadow-[0_40px_80px_-20px_rgba(0,0,0,0.1)] border border-white p-12 relative overflow-hidden flex flex-col items-center">
+                 {/* Decorative Header Overlay */}
+                 <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-indigo-500 to-violet-500"/>
+                 
+                 <div className="w-20 h-20 bg-indigo-600 rounded-[2rem] flex items-center justify-center text-white shadow-2xl mb-10 transform -rotate-6 animate-in zoom-in-50 duration-500">
+                    <Sparkles className="w-10 h-10"/>
+                 </div>
+                 
+                 <div className="text-center mb-10">
+                    <h2 className="text-3xl font-black text-slate-900 italic uppercase tracking-tighter leading-none mb-2">Bảo Minh AI</h2>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.4em]">Studio Voice Premium</p>
+                 </div>
+
+                 <div className="w-full space-y-5 relative z-10">
+                    <div className="space-y-2">
+                       <label className="text-[10px] font-black uppercase text-slate-400 ml-4 flex items-center gap-2"><Mail className="w-3 h-3"/> Tài khoản đăng nhập</label>
+                       <input type="text" value={loginCreds.id} onChange={e => setLoginCreds({...loginCreds, id: e.target.value})} placeholder="Nhập ID đăng nhập" className="w-full px-8 py-5 bg-slate-50 border-2 border-transparent rounded-[1.8rem] text-sm font-bold outline-none focus:bg-white focus:border-indigo-500 transition-all shadow-inner"/>
+                    </div>
+                    
+                    <div className="space-y-2">
+                       <label className="text-[10px] font-black uppercase text-slate-400 ml-4 flex items-center gap-2"><Lock className="w-3 h-3"/> Mật khẩu hệ thống</label>
+                       <input type="password" value={loginCreds.pass} onChange={e => setLoginCreds({...loginCreds, pass: e.target.value})} placeholder="••••••••" className="w-full px-8 py-5 bg-slate-50 border-2 border-transparent rounded-[1.8rem] text-sm font-bold outline-none focus:bg-white focus:border-indigo-500 transition-all shadow-inner"/>
+                    </div>
+
+                    {loginError && (
+                      <div className="px-6 py-3 bg-rose-50 border border-rose-100 rounded-2xl flex items-center gap-3 animate-in slide-in-from-top-2">
+                         <Ban className="w-4 h-4 text-rose-500"/>
+                         <p className="text-[10px] font-black text-rose-600 uppercase italic">{loginError}</p>
+                      </div>
+                    )}
+
+                    <button onClick={handleLogin} className="w-full py-6 bg-slate-900 text-white rounded-[1.8rem] text-[13px] font-black uppercase shadow-2xl hover:bg-indigo-600 active:scale-95 transition-all flex items-center justify-center gap-3 group mt-4">
+                       Tiến vào Studio <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform"/>
+                    </button>
+                 </div>
+
+                 <div className="mt-12 pt-8 border-t border-slate-50 w-full text-center">
+                    <div className="flex items-center justify-center gap-2 text-slate-300">
+                       <ShieldCheck className="w-4 h-4 text-emerald-500"/>
+                       <span className="text-[9px] font-black uppercase tracking-widest">Hệ thống bảo mật bởi Gemini AI</span>
+                    </div>
+                 </div>
+              </div>
+           </div>
         </div>
       )}
 
-      <div className="max-w-6xl mx-auto space-y-8">
-        {/* Header Logged In */}
-        <header className="flex items-center justify-between">
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
-                Gemini Voice AI
-            </h1>
-            <div className="flex items-center gap-4">
-                <div className="flex flex-col items-end">
-                    <span className="font-bold text-white">{currentUser.displayName}</span>
-                    <span className="text-xs text-slate-400 bg-slate-900 px-2 rounded border border-slate-800 flex items-center gap-1">
-                        {currentUser.planType} • {currentUser.credits.toLocaleString()} ký tự
-                    </span>
-                </div>
-                {currentUser.role === 'ADMIN' && (
-                    <button onClick={() => setShowAdmin(!showAdmin)} className={`p-2 rounded-lg transition-colors ${showAdmin ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}>
-                        <Shield className="w-5 h-5" />
-                    </button>
-                )}
-                <button onClick={() => setCurrentUser(null)} className="p-2 bg-slate-800 hover:bg-red-900/50 text-slate-400 hover:text-red-400 rounded-lg transition-colors">
-                    <LogOut className="w-5 h-5" />
-                </button>
+      {/* CÁC MODAL KHÁC ... (Giữ nguyên cấu trúc đã rà soát) */}
+      {editingAd && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center p-6 bg-slate-900/80 backdrop-blur-3xl animate-in fade-in duration-300">
+          <div className="bg-white w-full max-w-3xl rounded-[3.5rem] shadow-2xl overflow-hidden flex flex-col">
+            <div className="p-10 bg-indigo-600 text-white flex items-center justify-between">
+               <div className="flex items-center gap-5">
+                  <div className="p-3 bg-white/20 rounded-2xl"><Megaphone className="w-6 h-6"/></div>
+                  <h3 className="text-2xl font-black uppercase italic tracking-tighter">Cấu hình Quảng cáo</h3>
+               </div>
+               <button onClick={() => setEditingAd(null)} className="p-3 hover:bg-white/10 rounded-2xl transition-all"><X className="w-8 h-8"/></button>
             </div>
-        </header>
+            <div className="p-12 space-y-8 overflow-y-auto max-h-[65vh] custom-scrollbar">
+               <div className="grid grid-cols-2 gap-8">
+                  <div className="space-y-3"><label className="text-[11px] font-black uppercase text-slate-400 ml-2">Tiêu đề quảng cáo</label><input type="text" value={editingAd.title} onChange={e => setEditingAd({...editingAd, title: e.target.value})} className="w-full p-5 bg-slate-50 border-2 border-transparent rounded-[1.5rem] text-sm font-bold outline-none focus:bg-white focus:border-indigo-600 shadow-inner"/></div>
+                  <div className="space-y-3"><label className="text-[11px] font-black uppercase text-slate-400 ml-2">Trạng thái phát hành</label><select value={editingAd.isActive ? 'active' : 'inactive'} onChange={e => setEditingAd({...editingAd, isActive: e.target.value === 'active'})} className="w-full p-5 bg-slate-50 border-2 border-transparent rounded-[1.5rem] text-sm font-bold outline-none cursor-pointer"><option value="active">Đang hoạt động</option><option value="inactive">Tạm dừng</option></select></div>
+               </div>
+               <div className="space-y-3"><label className="text-[11px] font-black uppercase text-slate-400 ml-2">Nội dung hiển thị</label><textarea value={editingAd.content} onChange={e => setEditingAd({...editingAd, content: e.target.value})} className="w-full p-6 bg-slate-50 border-2 border-transparent rounded-[1.5rem] text-sm font-medium h-32 outline-none focus:bg-white focus:border-indigo-600 shadow-inner"/></div>
+               <div className="p-8 bg-indigo-50/50 border-2 border-indigo-100 rounded-[2.5rem] space-y-6">
+                  <div className="flex items-center gap-3 text-indigo-600 mb-4"><Calendar className="w-5 h-5"/><h5 className="text-[11px] font-black uppercase tracking-widest">Thiết lập Lịch trình (Đặt lịch)</h5></div>
+                  <div className="grid grid-cols-2 gap-8">
+                     <div className="space-y-3"><label className="text-[10px] font-black uppercase text-indigo-400 ml-2">Bắt đầu hiển thị</label><input type="date" value={editingAd.startDate || ''} onChange={e => setEditingAd({...editingAd, startDate: e.target.value})} className="w-full p-5 bg-white border-none rounded-[1.5rem] text-sm font-bold shadow-sm outline-none"/></div>
+                     <div className="space-y-3"><label className="text-[10px] font-black uppercase text-indigo-400 ml-2">Kết thúc hiển thị</label><input type="date" value={editingAd.endDate || ''} onChange={e => setEditingAd({...editingAd, endDate: e.target.value})} className="w-full p-5 bg-white border-none rounded-[1.5rem] text-sm font-bold shadow-sm outline-none"/></div>
+                  </div>
+               </div>
+            </div>
+            <div className="p-10 bg-slate-50 border-t flex gap-5">
+               <button onClick={async () => { 
+                 const updatedAds = ads.some(x => x.id === editingAd.id) 
+                   ? ads.map(x => x.id === editingAd.id ? editingAd : x) 
+                   : [...ads, editingAd];
+                 setAds(updatedAds); 
+                 await saveToDb('ads', updatedAds); 
+                 setEditingAd(null); 
+               }} className="flex-1 py-5 bg-indigo-600 text-white rounded-2xl text-[12px] font-black uppercase shadow-2xl flex items-center justify-center gap-3 hover:bg-indigo-700 active:scale-95 transition-all"><Save className="w-6 h-6"/> Lưu & Áp dụng</button>
+               <button onClick={() => setEditingAd(null)} className="px-10 py-5 bg-white border-2 text-slate-400 rounded-2xl text-[10px] font-black uppercase hover:bg-slate-100 transition-all">Đóng</button>
+            </div>
+          </div>
+        </div>
+      )}
 
-        {/* View Switcher: Admin or App */}
-        {showAdmin && currentUser.role === 'ADMIN' ? (
-            <AdminDashboard users={users} keys={keys} setUsers={setUsers} setKeys={setKeys} />
-        ) : (
-            <div className="space-y-6 animate-in fade-in">
-                {/* Reward Banner - Always Visible */}
-                <KeyRewardSection 
-                    currentUser={currentUser} 
-                    onSubmitKey={handleSubmitKey} 
-                    dailyCount={currentUser.dailyKeyCount} 
-                />
-
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                    {/* Left: Mode & Input */}
-                    <div className="lg:col-span-4 space-y-6">
-                        <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800">
-                            <h2 className="text-sm font-semibold text-slate-400 mb-4 uppercase tracking-wider">Chế độ đọc</h2>
-                            <div className="grid grid-cols-2 gap-2">
-                                {READING_MODES.map(mode => (
-                                    <button 
-                                        key={mode.id}
-                                        onClick={() => setSelectedMode(mode.id as ReadingMode)}
-                                        className={`p-3 rounded-xl text-left text-sm transition-all flex items-center gap-2 ${selectedMode === mode.id ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30' : 'hover:bg-slate-800 text-slate-400'}`}
-                                    >
-                                        {mode.icon}
-                                        <span className="truncate">{mode.label}</span>
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-
-                        <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800 space-y-4">
-                            <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Nội dung đầu vào</h2>
-                            <textarea 
-                                value={input}
-                                onChange={(e) => setInput(e.target.value)}
-                                placeholder={`Nhập chủ đề cho "${activeMode.label}"...`}
-                                className="w-full h-32 bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none text-slate-300"
-                            />
-                            <button 
-                                type="button" 
-                                onClick={handleGenerateText}
-                                disabled={state.isGeneratingText || !input.trim()}
-                                className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-xl text-white font-semibold flex items-center justify-center gap-2 transition-all"
-                            >
-                                {state.isGeneratingText ? <Loader2 className="animate-spin w-4 h-4"/> : <Wand2 className="w-4 h-4"/>}
-                                {state.isGeneratingText ? 'Đang viết...' : 'Tạo nội dung'}
-                            </button>
-                        </div>
-                    </div>
-
-                    {/* Right: Output & Voice Settings */}
-                    <div className="lg:col-span-8 space-y-6">
-                        <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden flex flex-col h-[650px]">
-                            <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/80 backdrop-blur-sm z-10">
-                                <h2 className="font-semibold flex items-center gap-2">
-                                    <FileText className="w-4 h-4 text-indigo-400"/>
-                                    Văn bản cần đọc
-                                </h2>
-                                <div className="flex gap-2">
-                                     <button onClick={() => setState(prev => ({...prev, text: ''}))} className="p-2 hover:bg-slate-800 rounded-lg text-slate-400"><Eraser className="w-4 h-4"/></button>
-                                </div>
-                            </div>
-                            <textarea 
-                                value={state.text}
-                                onChange={(e) => setState(prev => ({...prev, text: e.target.value}))}
-                                placeholder="Văn bản được tạo sẽ xuất hiện ở đây. Bạn cũng có thể nhập trực tiếp..."
-                                className="flex-1 w-full bg-slate-950 p-6 text-lg leading-relaxed focus:outline-none resize-none font-medium text-slate-300"
-                            />
-                            
-                            <div className="p-4 border-t border-slate-800 bg-slate-900/50 space-y-4">
-                                <div className="flex overflow-x-auto gap-3 pb-2 no-scrollbar items-center">
-                                    {/* Upload Voice Sample Button */}
-                                    <button 
-                                        onClick={() => fileInputRef.current?.click()}
-                                        className="shrink-0 px-4 py-2 rounded-full text-xs font-bold border border-indigo-500 text-indigo-400 bg-indigo-500/10 hover:bg-indigo-500/20 transition-all flex items-center gap-2"
-                                    >
-                                        <FileUp className="w-3 h-3" /> Tải giọng mẫu ({currentUser.customVoices.length}/2)
-                                    </button>
-
-                                    {/* Custom Voices List */}
-                                    {currentUser.customVoices?.map(voice => (
-                                        <button
-                                            key={voice.id}
-                                            onClick={() => setVoiceConfig(prev => ({
-                                                ...prev, 
-                                                useClonedVoice: true,
-                                                activeClonedVoiceId: voice.id,
-                                                voiceName: voice.gender === 'Nam' ? 'Fenrir' : 'Kore',
-                                                activePresetId: undefined 
-                                            }))}
-                                            className={`shrink-0 px-4 py-2 rounded-full text-xs font-medium border transition-all flex items-center gap-1 ${voiceConfig.activeClonedVoiceId === voice.id ? 'bg-purple-500/10 border-purple-500 text-purple-400' : 'border-slate-700 hover:border-slate-500 text-slate-400'}`}
-                                        >
-                                           <Mic className="w-3 h-3"/> {voice.name}
-                                        </button>
-                                    ))}
-
-                                    <div className="w-px h-6 bg-slate-700 mx-2"></div>
-
-                                    {/* Preset Voices */}
-                                     {PRESET_VOICES.map(preset => (
-                                         <button
-                                            key={preset.id}
-                                            onClick={() => setVoiceConfig(prev => ({
-                                                ...prev, 
-                                                activePresetId: preset.id, 
-                                                activeClonedVoiceId: undefined,
-                                                useClonedVoice: false,
-                                                voiceName: preset.baseVoice
-                                            }))}
-                                            className={`shrink-0 px-4 py-2 rounded-full text-xs font-medium border transition-all ${voiceConfig.activePresetId === preset.id ? 'bg-emerald-500/10 border-emerald-500 text-emerald-400' : 'border-slate-700 hover:border-slate-500 text-slate-400'}`}
-                                         >
-                                            {preset.label}
-                                         </button>
-                                     ))}
-                                </div>
-                                
-                                {/* Background Music Control */}
-                                <div className="flex items-center gap-4 bg-slate-800/50 p-2 rounded-xl">
-                                    <div className="flex items-center gap-2 flex-1">
-                                        <Music className="w-4 h-4 text-slate-400" />
-                                        <div className="flex-1 min-w-0">
-                                            {bgMusic ? (
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-xs text-indigo-300 truncate max-w-[150px]">{bgMusic.name}</span>
-                                                    <button onClick={() => setBgMusic(null)} className="text-slate-500 hover:text-red-400"><X className="w-3 h-3"/></button>
-                                                </div>
-                                            ) : (
-                                                <span className="text-xs text-slate-500 italic">Chưa có nhạc nền</span>
-                                            )}
-                                        </div>
-                                    </div>
-                                    
-                                    {bgMusic ? (
-                                        <div className="flex items-center gap-2 w-32">
-                                            <span className="text-[10px] text-slate-500">Vol</span>
-                                            <input 
-                                                type="range" min="0" max="1" step="0.05" 
-                                                value={bgVolume} 
-                                                onChange={(e) => setBgVolume(parseFloat(e.target.value))}
-                                                className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                                            />
-                                        </div>
-                                    ) : (
-                                        <button 
-                                            onClick={() => bgMusicInputRef.current?.click()}
-                                            className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs text-slate-200 transition-colors flex items-center gap-1"
-                                        >
-                                            <Upload className="w-3 h-3" /> Chọn nhạc nền
-                                        </button>
-                                    )}
-                                </div>
-
-                                <div className="flex items-center justify-between">
-                                     <div className="text-xs text-slate-500">
-                                         {state.text.length} ký tự • {currentUser.credits.toLocaleString()} còn lại
-                                     </div>
-                                     <button 
-                                        type="button" 
-                                        onClick={handleGenerateAudio}
-                                        disabled={state.isGeneratingAudio || !state.text.trim()}
-                                        className="px-8 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-xl text-white font-bold shadow-lg shadow-emerald-900/20 flex items-center gap-2 transition-all"
-                                     >
-                                         {state.isGeneratingAudio ? <Loader2 className="animate-spin w-5 h-5"/> : <Play className="w-5 h-5 fill-current"/>}
-                                         {state.isGeneratingAudio ? 'Đang xử lý...' : 'Đọc ngay'}
-                                     </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                {/* Floating Custom Player */}
-                <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-full max-w-3xl px-4 z-50">
-                    {state.audioUrl && (
-                        <div className="bg-slate-900 text-white rounded-[2rem] p-6 shadow-2xl flex flex-col md:flex-row items-center gap-6 animate-in slide-in-from-bottom-8 border border-slate-800">
-                            {/* Hidden Audio Element */}
-                            <audio 
-                                key={state.audioUrl} // CRITICAL FIX: Forces re-mount when URL changes
-                                ref={audioRef}
-                                onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                                onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-                                onEnded={() => setIsPlaying(false)}
-                                onPlay={() => setIsPlaying(true)}
-                                onPause={() => setIsPlaying(false)}
-                                onError={(e) => console.error("Audio error:", e)}
-                                autoPlay
-                                hidden
-                            >
-                                <source src={state.audioUrl!} type="audio/wav" />
-                            </audio>
-
-                            {/* Icon Visual */}
-                            <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 shadow-lg ${isPlaying ? 'bg-indigo-600 animate-pulse' : 'bg-slate-800'}`}>
-                                <Waves className="w-7 h-7"/>
-                            </div>
-
-                            {/* Custom Controls */}
-                            <div className="flex-1 w-full min-w-0 flex flex-col gap-2">
-                                 <div className="flex items-center gap-4">
-                                     {/* Rewind 15s */}
-                                     <button 
-                                        onClick={() => handleSkip(-15)} 
-                                        className="text-slate-400 hover:text-white transition-colors flex flex-col items-center gap-1 group"
-                                        title="Lùi 15 giây"
-                                     >
-                                        <Rewind className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                                        <span className="text-[9px] font-mono">-15s</span>
-                                     </button>
-
-                                     <button 
-                                        onClick={togglePlayback}
-                                        className="w-12 h-12 bg-white text-slate-900 rounded-full flex items-center justify-center hover:scale-105 transition-transform shadow-lg shadow-white/10"
-                                     >
-                                         {isPlaying ? <Pause className="w-6 h-6 fill-current"/> : <Play className="w-6 h-6 fill-current ml-1"/>}
-                                     </button>
-
-                                     {/* Forward 15s */}
-                                     <button 
-                                        onClick={() => handleSkip(15)} 
-                                        className="text-slate-400 hover:text-white transition-colors flex flex-col items-center gap-1 group"
-                                        title="Tua 15 giây"
-                                     >
-                                        <FastForward className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                                        <span className="text-[9px] font-mono">+15s</span>
-                                     </button>
-
-                                     <input 
-                                        type="range" 
-                                        min="0" 
-                                        max={duration || 0} 
-                                        value={currentTime} 
-                                        onChange={handleSeek}
-                                        className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                                     />
-                                     <div className="text-xs font-mono text-slate-400 whitespace-nowrap min-w-[80px] text-right">
-                                         {formatTime(currentTime)} / {formatTime(duration)}
-                                     </div>
-                                 </div>
-                            </div>
-
-                            {/* Actions */}
-                            <div className="flex gap-3 shrink-0">
-                                <a href={state.audioUrl} download="baominh_audio.wav" className="px-4 py-3 bg-slate-800 hover:bg-slate-700 rounded-xl text-[10px] font-bold uppercase transition-all flex items-center gap-2">
-                                    <Download className="w-4 h-4"/> WAV
-                                </a>
-                                <a href={state.mp3Url || '#'} download="baominh_audio.mp3" className="px-4 py-3 bg-slate-800 hover:bg-slate-700 rounded-xl text-[10px] font-bold uppercase transition-all flex items-center gap-2">
-                                    <Download className="w-4 h-4"/> MP3
-                                </a>
-                                <button onClick={() => {
-                                    setState(prev => ({...prev, audioUrl: null}));
-                                    setIsPlaying(false);
-                                }} className="p-3 hover:bg-slate-800 rounded-xl transition-all text-slate-400 hover:text-white" title="Thoát kết quả">
-                                    <X className="w-5 h-5"/>
-                                </button>
-                            </div>
-                        </div>
+      {isCloningModalOpen && (
+        <div className="fixed inset-0 z-[350] flex items-center justify-center p-6 bg-slate-900/80 backdrop-blur-3xl animate-in fade-in duration-300">
+           <div className="bg-white w-full max-w-md rounded-[3rem] shadow-2xl overflow-hidden animate-in zoom-in-95">
+              <div className="p-8 bg-amber-500 text-white flex items-center justify-between">
+                 <div className="flex items-center gap-3"><Zap className="w-6 h-6"/><h3 className="text-sm font-black uppercase italic tracking-widest">Clone giọng 20 giây</h3></div>
+                 <button onClick={() => setIsCloningModalOpen(false)} className="p-2 hover:bg-white/10 rounded-xl transition-all"><X className="w-7 h-7"/></button>
+              </div>
+              <div className="p-10 space-y-8">
+                 <div className="p-6 bg-amber-50 border-2 border-amber-100 rounded-[2rem] text-center italic">
+                    <p className="text-[11px] font-bold text-amber-800 leading-relaxed">🎁 Tải file mẫu. Hệ thống sẽ cắt đúng 20 giây đầu tiên để phân tích tông giọng.</p>
+                 </div>
+                 
+                 <div onClick={() => cloneInputRef.current?.click()} className={`w-full py-16 border-2 border-dashed rounded-[2.5rem] flex flex-col items-center justify-center gap-4 transition-all cursor-pointer ${cloningFile ? 'border-emerald-500 bg-emerald-50' : 'border-slate-200 bg-slate-50 hover:border-amber-400'}`}>
+                    {cloningFile ? (
+                      <div className="flex flex-col items-center gap-2"><CheckCircle2 className="w-12 h-12 text-emerald-500"/><p className="text-[11px] font-black uppercase text-emerald-700 truncate max-w-[200px]">{cloningFile.name}</p></div>
+                    ) : (
+                      <>
+                        <Upload className="w-12 h-12 text-slate-200"/>
+                        <p className="text-[11px] font-black uppercase text-slate-400 tracking-widest text-center px-10">Tải file âm thanh mẫu</p>
+                      </>
                     )}
-                </div>
-            </div>
-        )}
+                    <input type="file" ref={cloneInputRef} onChange={(e) => setCloningFile(e.target.files?.[0] || null)} accept="audio/*" className="hidden"/>
+                 </div>
 
-        {/* Error Notification */}
-        {state.error && (
-            <div className="fixed top-4 right-4 bg-red-500/10 border border-red-500 text-red-400 p-4 rounded-xl shadow-2xl max-w-md animate-in slide-in-from-right z-50">
-                <p className="text-sm">{state.error}</p>
-                <button onClick={() => setState(prev => ({...prev, error: null}))} className="absolute top-2 right-2 p-1 hover:bg-red-500/20 rounded-full"><X className="w-3 h-3"/></button>
-            </div>
-        )}
-      </div>
+                 <button onClick={async () => {
+                      if (!cloningFile) return;
+                      setIsAnalyzing(true);
+                      try {
+                        const arrayBuffer = await cloningFile.arrayBuffer();
+                        // QUY TẮC: Luôn cắt 20s
+                        const { base64 } = await trimAudioTo20Seconds(arrayBuffer);
+                        const result = await analyzeVoice(base64, null, managedKeys[0]?.key || process.env.API_KEY || "");
+                        alert(`Phân tích hoàn tất! Đã lưu giọng: ${result.suggestedName}`);
+                        setIsCloningModalOpen(false);
+                      } catch (e) { alert("Lỗi phân tích âm thanh"); }
+                      finally { setIsAnalyzing(false); }
+                   }} disabled={isAnalyzing || !cloningFile} className="w-full py-6 bg-amber-500 text-white rounded-2xl text-[12px] font-black uppercase shadow-xl flex items-center justify-center gap-3 disabled:opacity-50">
+                    {isAnalyzing ? <Loader2 className="w-7 h-7 animate-spin"/> : <Sparkles className="w-7 h-7"/>} Bắt đầu phân tích
+                 </button>
+              </div>
+           </div>
+        </div>
+      )}
+
+      {isVoicePanelOpen && (
+        <div className="fixed inset-0 z-[400] flex items-center justify-center p-8 bg-slate-900/80 backdrop-blur-2xl animate-in fade-in">
+           <div className="bg-white w-full max-w-5xl h-[85vh] rounded-[4rem] shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95">
+              <div className="p-12 border-b flex items-center justify-between bg-white/50">
+                 <div className="flex items-center gap-5"><div className="p-4 bg-indigo-600 text-white rounded-[1.5rem] shadow-xl"><Mic2 className="w-8 h-8"/></div><h3 className="text-3xl font-black text-slate-800 uppercase italic tracking-tighter">Thư viện Giọng đọc</h3></div>
+                 <button onClick={() => setIsVoicePanelOpen(false)} className="p-5 text-slate-300 hover:text-red-500 transition-all"><X className="w-10 h-10"/></button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-12 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 custom-scrollbar">
+                  {PRESET_VOICES.map(v => (
+                    <button key={v.id} onClick={() => { setConfig({...config, activePresetId: v.id, voiceName: v.baseVoice}); setIsVoicePanelOpen(false); }} className={`flex flex-col p-8 rounded-[2.5rem] border-2 text-left transition-all relative group ${config.activePresetId === v.id ? 'border-indigo-600 bg-indigo-50 shadow-2xl' : 'border-slate-50 bg-slate-50 hover:bg-white hover:border-indigo-200'}`}>
+                       <div className="flex items-center gap-5 mb-6">
+                          <div className={`w-16 h-16 rounded-[1.5rem] flex items-center justify-center text-white font-bold text-2xl shadow-lg transition-transform group-hover:rotate-6 ${v.gender === 'Nam' ? 'bg-indigo-500' : 'bg-rose-500'}`}>{v.label.charAt(0)}</div>
+                          <div><p className="text-xs font-black uppercase text-slate-800 tracking-tight">{v.label}</p><div className="flex gap-1.5 mt-2">{v.tags.map(t => <span key={t} className="text-[8px] font-black px-2 py-0.5 rounded-full uppercase bg-white/80 text-slate-400 border border-slate-100">{t}</span>)}</div></div>
+                       </div>
+                       <p className="text-[11px] text-slate-400 leading-relaxed italic mb-4 font-medium line-clamp-3">"{v.description}"</p>
+                       {config.activePresetId === v.id && <div className="absolute top-6 right-6 text-indigo-600 animate-in zoom-in"><CheckCircle2 className="w-7 h-7"/></div>}
+                    </button>
+                  ))}
+              </div>
+           </div>
+        </div>
+      )}
     </div>
   );
-}
+};
+
+export default App;

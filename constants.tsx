@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { 
   BookOpen, 
@@ -17,17 +18,7 @@ import {
   FileUp,
   Megaphone,
   Newspaper,
-  LayoutDashboard,
-  Trash2,
-  Edit,
-  UserPlus,
-  Key,
-  Shield,
-  LogOut,
-  MessageCircle,
-  ExternalLink,
-  Calendar,
-  CreditCard
+  LayoutDashboard
 } from 'lucide-react';
 import { ReadingMode, TTSProvider, VoicePreset } from './types';
 
@@ -191,22 +182,5 @@ export const ICONS = {
   FileUp,
   Megaphone,
   Newspaper,
-  LayoutDashboard,
-  Users,
-  BookOpen,
-  Music,
-  FileText,
-  Heart,
-  Mic2,
-  Clapperboard,
-  Trash2,
-  Edit,
-  UserPlus,
-  Key,
-  Shield,
-  LogOut,
-  MessageCircle,
-  ExternalLink,
-  Calendar,
-  CreditCard
+  LayoutDashboard
 };

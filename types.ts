@@ -1,3 +1,4 @@
+
 export enum TTSProvider {
   GEMINI = 'GEMINI'
 }
@@ -27,9 +28,30 @@ export interface ManagedKey {
   errorMessage?: string;
   usageCount: number;
   isTrialKey: boolean; 
-  allowedUserIds: string[]; // Danh sách UID được phép dùng Key này. Trống = Dùng chung.
-  addedBy?: string; // UID người đóng góp
+  allowedUserIds: string[]; 
 }
+
+export interface UserProfile {
+  uid: string;
+  displayName: string;
+  email: string;
+  photoURL: string;
+  role: UserRole;
+  credits: number; 
+  lastActive: string;
+  isBlocked: boolean;
+  planType: PlanType;
+  expiryDate: number; 
+  characterLimit: number; 
+  bonusDailyLimit?: number; 
+  lastResetDate?: string; 
+  loginId?: string; 
+  password?: string; 
+  dailyKeyCount?: number; 
+  lastKeyDate?: string; 
+}
+
+export type VoiceEmotion = 'NEUTRAL' | 'HAPPY' | 'SAD' | 'ANGRY' | 'SERIOUS' | 'EMOTIONAL' | 'WHISPER';
 
 export interface ClonedVoice {
   id: string;
@@ -39,31 +61,9 @@ export interface ClonedVoice {
   description: string;
   toneSummary: string;
   createdAt: number;
-  audioBase64?: string; // Sample audio for preview/reference
+  audioBase64?: string;
   mimeType?: string;
 }
-
-export interface UserProfile {
-  uid: string;
-  displayName: string;
-  email: string;
-  photoURL: string;
-  role: UserRole;
-  credits: number; // Ký tự còn lại trong ngày
-  lastActive: string; // Format: DD/MM/YYYY
-  isBlocked: boolean;
-  planType: PlanType;
-  expiryDate: number; 
-  characterLimit: number; // Giới hạn cơ bản theo gói
-  bonusDailyLimit?: number; // Giới hạn cộng thêm vĩnh viễn do đóng góp Key
-  lastResetDate?: string; // Ngày reset credits gần nhất
-  loginId?: string; // Tên đăng nhập do admin cấp
-  password?: string; // Mật khẩu do admin cấp
-  dailyKeyCount: number; // Số key đã đóng góp trong ngày (Reset mỗi ngày)
-  customVoices: ClonedVoice[]; // Danh sách giọng mẫu cá nhân (Max 2)
-}
-
-export type VoiceEmotion = 'NEUTRAL' | 'HAPPY' | 'SAD' | 'ANGRY' | 'SERIOUS' | 'EMOTIONAL' | 'WHISPER';
 
 export interface VoicePreset {
   id: string;
@@ -108,16 +108,18 @@ export interface AdCampaign {
   isActive: boolean;
   title: string;
   content: string;
-  imageUrl?: string; // Base64 image
+  imageUrl?: string;
   buttonText: string;
-  buttonLink: string; // Zalo link or other
+  buttonLink: string;
+  startDate?: string; // Định dạng YYYY-MM-DD
+  endDate?: string;   // Định dạng YYYY-MM-DD
   createdAt: number;
 }
 
 export interface SystemConfig {
-  enableKeyReward: boolean;     // Bật/tắt chương trình thưởng
-  keyRewardAmount: number;      // Số ký tự thưởng mỗi key
-  maxKeysPerDay: number;        // Giới hạn số key đóng góp mỗi ngày
+  enableKeyReward: boolean;
+  keyRewardAmount: number;
+  maxKeysPerDay: number;
 }
 
 declare global {
