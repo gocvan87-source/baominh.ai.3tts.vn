@@ -1,179 +1,309 @@
-
 import { GoogleGenAI, Modality, Type } from "@google/genai";
+import { ReadingMode, VoiceEmotion, AdvancedVoiceSettings } from "../types";
 import { VIETNAMESE_ABBREVIATIONS } from "../constants";
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
- * Xử lý lỗi Gemini API và xác định xem có nên thực hiện xoay Key hay không.
+ * Exponential backoff với jitter để tránh thundering herd
  */
-export const handleAiError = (error: any): { message: string, isRateLimit: boolean, shouldWait: boolean } => {
+const exponentialBackoff = async (retryCount: number, baseDelay: number = 1000): Promise<void> => {
+  const exponentialDelay = baseDelay * Math.pow(2, retryCount);
+  const jitter = Math.random() * 1000; // Random 0-1000ms để tránh synchronized retries
+  const totalDelay = Math.min(exponentialDelay + jitter, 30000); // Max 30 seconds
+  await delay(totalDelay);
+};
+
+/**
+ * Wrapper với timeout cho API calls
+ */
+const withTimeout = <T>(promise: Promise<T>, timeoutMs: number = 30000): Promise<T> => {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => 
+      setTimeout(() => reject(new Error('Request timeout after ' + timeoutMs + 'ms')), timeoutMs)
+    )
+  ]);
+};
+
+/**
+ * Kiểm tra API Key có thực sự hoạt động hay không bằng một request tối giản
+ */
+export const testApiKey = async (apiKey: string): Promise<{ valid: boolean, message: string }> => {
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    // Thử gọi một lệnh generateContent siêu ngắn để check key
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: "Ping",
+      config: { maxOutputTokens: 1 }
+    });
+    if (response) return { valid: true, message: "API Key hoạt động tốt." };
+    return { valid: false, message: "Không nhận được phản hồi từ AI." };
+  } catch (error: any) {
+    const info = handleAiError(error);
+    return { valid: false, message: info.message };
+  }
+};
+
+/**
+ * Xử lý lỗi Gemini API chi tiết với Retry-After support
+ */
+export const handleAiError = (error: any): { 
+  message: string, 
+  isRateLimit: boolean, 
+  shouldWait: boolean,
+  retryAfter?: number 
+} => {
   const rawMessage = error?.message ? String(error.message) : String(error);
   const lowerMessage = rawMessage.toLowerCase();
   
-  const isRateLimit = lowerMessage.includes("429") || lowerMessage.includes("resource exhausted") || lowerMessage.includes("quota");
-  const isServerBusy = lowerMessage.includes("500") || lowerMessage.includes("503");
+  const isRateLimit = lowerMessage.includes("429") || 
+                     lowerMessage.includes("resource exhausted") || 
+                     lowerMessage.includes("quota") ||
+                     lowerMessage.includes("rate limit");
+  const isInvalidKey = lowerMessage.includes("400") || 
+                      lowerMessage.includes("401") || 
+                      lowerMessage.includes("403") || 
+                      lowerMessage.includes("api key") || 
+                      lowerMessage.includes("invalid argument") || 
+                      lowerMessage.includes("not found");
+  const isSafetyBlock = lowerMessage.includes("safety") || lowerMessage.includes("blocked");
+  const isTimeout = lowerMessage.includes("timeout");
 
-  if (isRateLimit) return { message: "RATE_LIMIT", isRateLimit: true, shouldWait: true };
-  if (isServerBusy) return { message: "SERVER_BUSY", isRateLimit: false, shouldWait: true };
+  // Parse Retry-After từ response headers nếu có
+  let retryAfter: number | undefined;
+  if (error?.response?.headers?.['retry-after']) {
+    retryAfter = parseInt(error.response.headers['retry-after'], 10) * 1000; // Convert to ms
+  } else if (isRateLimit) {
+    retryAfter = 60000; // Default 60 seconds cho rate limit
+  }
 
-  return { message: rawMessage, isRateLimit: false, shouldWait: false };
+  if (isRateLimit) {
+    return { 
+      message: "❌ Hết hạn mức (429). Vui lòng thử lại sau.", 
+      isRateLimit: true, 
+      shouldWait: true,
+      retryAfter: retryAfter || 60000
+    };
+  }
+  if (isInvalidKey) {
+    return { 
+      message: "🚫 Key không hợp lệ hoặc đã bị vô hiệu hóa.", 
+      isRateLimit: false, 
+      shouldWait: false 
+    };
+  }
+  if (isSafetyBlock) {
+    return { 
+      message: "🛡️ Nội dung bị chặn do chính sách an toàn.", 
+      isRateLimit: false, 
+      shouldWait: false 
+    };
+  }
+  if (isTimeout) {
+    return { 
+      message: "⏱️ Request timeout. Vui lòng thử lại.", 
+      isRateLimit: false, 
+      shouldWait: true,
+      retryAfter: 5000
+    };
+  }
+  
+  return { 
+    message: `❗ Lỗi: ${rawMessage.substring(0, 100)}`, 
+    isRateLimit: false, 
+    shouldWait: false 
+  };
 };
 
 /**
- * Chuẩn hóa văn bản: Đảm bảo AI đọc đúng 100% chính tả, xử lý viết tắt và ký hiệu toán học.
+ * NGUYÊN TẮC VÀNG: Chuẩn hóa văn bản để đọc chính xác 100%
+ * Quy tắc này xử lý triệt để lỗi đọc sai chính tả, ký hiệu và định dạng đặc biệt.
+ * 
+ * Các tính năng:
+ * 1. Chuẩn hóa Unicode (NFC): Khắc phục lỗi hiển thị dấu tiếng Việt
+ * 2. Sửa lỗi dấu câu: Tự động thêm khoảng trắng sau dấu câu
+ * 3. Đọc đúng Ngày/Tháng: Tự động chuyển 10/10/2023 thành ngày 10 tháng 10 năm 2023
+ * 4. Đọc đúng Đơn vị đo lường: Tự động chuyển 5kg, 100km, 500đ thành đọc đúng
+ * 5. Mở rộng từ viết tắt: Tự động thay thế các từ viết tắt phổ biến
+ * 6. Xử lý ký tự đặc biệt: Chuyển gạch đầu dòng thành dấu phẩy
  */
-const normalizeTextForSpeech = (text: string): string => {
-  let processed = text;
-  
-  // 1. Xử lý các từ viết tắt (Sử dụng ranh giới từ để thay thế chính xác)
-  Object.entries(VIETNAMESE_ABBREVIATIONS).forEach(([abbr, fullText]) => {
-    const escapedAbbr = abbr.replace(/\./g, '\\.');
-    const regex = new RegExp(`(?<!\\w)${escapedAbbr}(?!\\w)`, 'gi');
-    processed = processed.replace(regex, fullText);
-  });
+export const normalizeTextForSpeech = (text: string): string => {
+  if (!text) return "";
 
-  // 2. Xử lý ký hiệu toán học/ký tự đặc biệt sang tiếng Việt
-  processed = processed.replace(/%/g, " phần trăm");
-  processed = processed.replace(/\+/g, " cộng ");
-  processed = processed.replace(/\//g, " trên ");
-  processed = processed.replace(/\*/g, " nhân ");
-  processed = processed.replace(/&/g, " và ");
-  processed = processed.replace(/=/g, " bằng ");
+  // 1. Chuẩn hóa Unicode (NFC) để xử lý lỗi font và dấu tiếng Việt
+  // Ví dụ: òa vs oà -> chuẩn hóa về một dạng
+  let processed = text.normalize("NFC");
+  processed = processed.replace(/[\u200B-\u200D\uFEFF]/g, " ");
+
+  // 2. Xử lý ngày tháng chuyên sâu (PHẢI XỬ LÝ TRƯỚC các ký hiệu toán học)
+  // dd/mm/yyyy -> ngày dd tháng mm năm yyyy
+  processed = processed.replace(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g, "ngày $1 tháng $2 năm $3");
+  // dd/mm -> ngày dd tháng mm
+  processed = processed.replace(/\b(\d{1,2})\/(\d{1,2})\b(?![\/\d])/g, "ngày $1 tháng $2");
+
+  // 3. Xử lý ký hiệu toán học và so sánh (Tránh đọc sai ký hiệu)
+  // FIX: Sử dụng lookahead thay vì \b vì % không phải word character
+  processed = processed.replace(/(\d+)\s*%(?=\s|$|[^\w%])/g, "$1 phần trăm");
   
-  // 3. Xử lý các dấu ngắt nghỉ và loại bỏ ký tự rác
-  processed = processed.replace(/(\s+-\s+|(?<!\d)-(?!\d))/g, ", ");
-  processed = processed.replace(/[#$^*()_+={}[\]|\\<>]/g, ' ');
+  // FIX: Sử dụng pattern đơn giản hơn, không dùng lookbehind để tương thích tốt hơn
+  // Xử lý dấu + khi có số ở cả hai bên hoặc có khoảng trắng
+  processed = processed.replace(/(\d+)\s*\+\s*(\d+)/g, "$1 cộng $2");
+  processed = processed.replace(/\s\+\s/g, " cộng ");
+  processed = processed.replace(/\s*=\s*/g, " bằng ");
+  // FIX: Sửa regex > và < để không match với đơn vị đo lường (ví dụ: 5l không bị match)
+  processed = processed.replace(/(\d+)\s*>\s*(\d+)/g, "$1 lớn hơn $2");
+  processed = processed.replace(/\s*>\s*/g, " lớn hơn ");
+  processed = processed.replace(/(\d+)\s*<\s*(\d+)/g, "$1 nhỏ hơn $2");
+  processed = processed.replace(/\s*<\s*/g, " nhỏ hơn ");
+  processed = processed.replace(/(\d+)\s*\*\s*(\d+)/g, "$1 nhân $2");
+  // Chỉ xử lý phép chia khi không phải ngày tháng (đã xử lý ở trên)
+  processed = processed.replace(/(\d+)\s*\/\s*(\d+)(?!\/)/g, "$1 chia $2");
+
+  // 4. Xử lý đơn vị tiền tệ và đo lường (Chỉ khi đứng sau số)
+  // FIX: Sử dụng \d+ thay vì \d để match nhiều chữ số (5kg, 100km, 500đ)
+  const units: Record<string, string> = {
+    "kg": "ki lô gam", "km": "ki lô mét", "cm": "xăng ti mét", "mm": "mi li mét",
+    "m2": "mét vuông", "m3": "mét khối", "ml": "mi li lít", "l": "lít", "g": "gam",
+    "đ": "đồng", "vnd": "việt nam đồng", "usd": "đô la mỹ", "tr": "triệu", "tỷ": "tỷ"
+  };
   
+  // Sắp xếp units theo độ dài giảm dần để match đơn vị dài trước (ví dụ: "m2" trước "m")
+  const sortedUnits = Object.entries(units).sort((a, b) => b[0].length - a[0].length);
+  for (const [unit, reading] of sortedUnits) {
+    // Escape các ký tự đặc biệt trong unit
+    const escapedUnit = unit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // FIX: Sử dụng \d+ và lookahead chặt chẽ hơn để đảm bảo unit không nằm trong từ khác
+    // Chỉ match khi unit là một từ độc lập (có khoảng trắng hoặc ký tự không phải chữ sau unit)
+    // Và đảm bảo không match khi unit là phần của từ khác (ví dụ: "l" trong "lớn")
+    const regex = new RegExp(`(\\d+)\\s*${escapedUnit}(?=\\s|$|[^\\w\\u00C0-\\u1EF9])`, 'gi');
+    processed = processed.replace(regex, `$1 ${reading}`);
+  }
+
+  // 5. Mở rộng từ viết tắt (Theo danh sách chuẩn từ constants)
+  const sortedAbbrs = Object.keys(VIETNAMESE_ABBREVIATIONS).sort((a, b) => b.length - a.length);
+  for (const abbr of sortedAbbrs) {
+      const fullText = VIETNAMESE_ABBREVIATIONS[abbr];
+      const escapedAbbr = abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Nếu có dấu chấm ở cuối (TP.), match nguyên văn, nếu không dùng word boundary
+      const regex = abbr.endsWith('.') ? new RegExp(escapedAbbr, 'gi') : new RegExp(`\\b${escapedAbbr}\\b`, 'g');
+      processed = processed.replace(regex, fullText + " ");
+  }
+
+  // 6. Chuẩn hóa dấu câu để AI ngắt nghỉ đúng (Dấu câu dính liền)
+  // Tự động thêm khoảng trắng sau dấu câu nếu thiếu
+  processed = processed.replace(/([,.!:;?])(?=[^\s\d])/g, '$1 '); // "chào,bạn" -> "chào, bạn"
+  // Xóa khoảng trắng thừa trước dấu câu
+  processed = processed.replace(/\s+([,.!:;?])/g, '$1'); // "chào , bạn" -> "chào, bạn"
+  
+  // 7. Xử lý gạch đầu dòng và phân đoạn (Tránh đọc là "trừ")
+  // Chuyển gạch đầu dòng thành dấu phẩy để ngắt nhịp thở tự nhiên hơn
+  processed = processed.replace(/(^|\n)\s*-\s+/g, "$1, "); 
+
+  // 8. Dọn dẹp khoảng trắng thừa
   return processed.replace(/\s+/g, ' ').trim();
 };
 
-/**
- * QUY TẮC NGHIÊM NGẶT: Cắt lấy tối đa 20s đầu tiên của giọng mẫu để phân tích.
- */
-export const trimAudioTo20Seconds = async (audioArrayBuffer: ArrayBuffer): Promise<{ base64: string, duration: number }> => {
-  const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-  const audioBuffer = await audioContext.decodeAudioData(audioArrayBuffer.slice(0));
-  
-  const durationToKeep = Math.min(audioBuffer.duration, 20); 
-  const sampleRate = audioBuffer.sampleRate;
-  const framesToKeep = Math.floor(durationToKeep * sampleRate);
-  
-  const newBuffer = audioContext.createBuffer(audioBuffer.numberOfChannels, framesToKeep, sampleRate);
-  for (let i = 0; i < audioBuffer.numberOfChannels; i++) {
-    newBuffer.getChannelData(i).set(audioBuffer.getChannelData(i).slice(0, framesToKeep));
-  }
-
-  const wavArrayBuffer = audioBufferToWav(newBuffer);
-  const wavBlob = pcmToWav(wavArrayBuffer, sampleRate);
-  
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64 = (reader.result as string).split(',')[1];
-      resolve({ base64, duration: durationToKeep });
-    };
-    reader.readAsDataURL(wavBlob);
-  });
+export const generateContentFromDescription = async (prompt: string, modePrompt: string, onLog?: any, apiKey: string = "") => {
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: `${modePrompt}\n\n${prompt}\n\nYêu cầu: Viết tiếng Việt chuẩn, tuyệt đối không viết tắt, không dùng tiếng lóng.`,
+    });
+    return response.text || '';
+  } catch (error: any) { throw new Error(handleAiError(error).message); }
 };
 
-function audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
-  const numChannels = buffer.numberOfChannels;
-  const length = buffer.length * numChannels * 2;
-  const result = new ArrayBuffer(length);
-  const view = new DataView(result);
-  let offset = 0;
-  for (let i = 0; i < buffer.length; i++) {
-    for (let channel = 0; channel < numChannels; channel++) {
-      let sample = Math.max(-1, Math.min(1, buffer.getChannelData(channel)[i]));
-      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
-      offset += 2;
-    }
-  }
-  return result;
-}
-
-/**
- * Xử lý văn bản thành giọng nói với cơ chế XOAY KEY TỰ ĐỘNG khi lỗi Quota.
- * Quy tắc: Chia đoạn < 800 ký tự và Độ trễ 3s mỗi đoạn.
- */
-export const generateAudioParallel = async (
-  text: string,
-  config: any,
-  onProgress: (percent: number) => void,
-  onLog: (m: string, t: 'info' | 'error') => void,
-  apiKeys: string[] 
+export const generateAudioSegment = async (
+  text: string, 
+  config: any, 
+  onLog?: any, 
+  apiKey: string = "",
+  retryCount: number = 0,
+  maxRetries: number = 3
 ): Promise<ArrayBuffer> => {
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await withTimeout(
+      ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: config.voiceName } } },
+        },
+      }),
+      30000 // 30 seconds timeout
+    );
+    const base64 = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
+    if (!base64) throw new Error("TTS Failure");
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  } catch (error: any) {
+    const errorInfo = handleAiError(error);
+    
+    // Retry logic với exponential backoff
+    if (retryCount < maxRetries && (errorInfo.isRateLimit || errorInfo.shouldWait)) {
+      const waitTime = errorInfo.retryAfter || (1000 * Math.pow(2, retryCount));
+      if (onLog) onLog(`Segment error, retrying (${retryCount + 1}/${maxRetries}) after ${Math.round(waitTime/1000)}s...`, 'warning');
+      await delay(waitTime);
+      return generateAudioSegment(text, config, onLog, apiKey, retryCount + 1, maxRetries);
+    }
+    
+    throw new Error(errorInfo.message);
+  }
+};
+
+export const generateAudioParallel = async (text: string, config: any, onProgress: any, onLog?: any, apiKey: string = ""): Promise<ArrayBuffer> => {
+  // BƯỚC QUAN TRỌNG: Chuẩn hóa văn bản trước khi chia nhỏ
   const normalizedText = normalizeTextForSpeech(text);
   
   const rawChunks = normalizedText.match(/[^.!?\n]+[.!?\n]*|[^.!?\n]+/g) || [normalizedText];
   const combinedChunks: string[] = [];
   let current = "";
-  const LIMIT = 800; 
+  const LIMIT = 600; 
 
   for (const c of rawChunks) {
     if ((current + c).length < LIMIT) current += c;
-    else {
-      if (current) combinedChunks.push(current.trim());
-      current = c;
-    }
+    else { if (current) combinedChunks.push(current.trim()); current = c; }
   }
   if (current) combinedChunks.push(current.trim());
 
-  const total = combinedChunks.length;
+  // Adaptive delay: tăng delay nếu gặp rate limit
+  let adaptiveDelay = 1200; // Base delay
   const results: ArrayBuffer[] = [];
-  let currentKeyIndex = 0;
-
-  for (let i = 0; i < total; i++) {
-    // ĐỘ TRỄ 3S GIỮA CÁC ĐOẠN để tránh lỗi Rate Limit
-    if (i > 0) await delay(3000);
-    
-    let success = false;
-    let attempts = 0;
-
-    // Cơ chế xoay Key tự động
-    while (!success && attempts < apiKeys.length * 2) {
-      const activeKey = apiKeys[currentKeyIndex % apiKeys.length];
-      try {
-        const ai = new GoogleGenAI({ apiKey: activeKey });
-        const response = await ai.models.generateContent({
-          model: "gemini-2.5-flash-native-audio-preview-12-2025",
-          contents: [{ parts: [{ text: combinedChunks[i] }] }],
-          config: {
-            responseModalities: [Modality.AUDIO],
-            speechConfig: {
-              voiceConfig: { prebuiltVoiceConfig: { voiceName: config.voiceName } },
-            },
-          },
-        });
-
-        const base64 = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
-        if (!base64) throw new Error("VOICE_DATA_MISSING");
-        
-        const binaryString = atob(base64);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let j = 0; j < binaryString.length; j++) bytes[j] = binaryString.charCodeAt(j);
-        results.push(bytes.buffer);
-        
-        success = true;
-        onProgress(Math.round(((i + 1) / total) * 100));
-      } catch (e: any) {
-        attempts++;
-        const errorInfo = handleAiError(e);
-        if (errorInfo.isRateLimit) {
-          onLog(`Key #${currentKeyIndex + 1} hết hạn mức, đang xoay Key...`, 'info');
-          currentKeyIndex++; 
-        } else {
-          onLog(`Thử lại đoạn ${i+1}...`, 'info');
-          await delay(4000); 
-        }
-      }
+  
+  for (let i = 0; i < combinedChunks.length; i++) {
+    if (i > 0) {
+      await delay(adaptiveDelay); // Sử dụng adaptive delay
+      if (onLog) onLog(`Processing segment ${i + 1}/${combinedChunks.length}...`, 'info');
     }
     
-    if (!success) throw new Error(`Quá tải hệ thống sau khi thử hết các Key khả dụng.`);
+    try {
+      const segment = await generateAudioSegment(combinedChunks[i], config, onLog, apiKey);
+      results.push(segment);
+      
+      // Giảm delay nếu response nhanh (thành công)
+      adaptiveDelay = Math.max(adaptiveDelay * 0.95, 800); // Min 800ms
+      
+      onProgress(Math.round(((i + 1) / combinedChunks.length) * 100));
+    } catch (error: any) {
+      // Tăng delay nếu gặp lỗi rate limit
+      const errorInfo = handleAiError(error);
+      if (errorInfo.isRateLimit || errorInfo.shouldWait) {
+        adaptiveDelay = Math.min(adaptiveDelay * 1.5, 5000); // Max 5 seconds
+        if (onLog) onLog(`Rate limit detected, increasing delay to ${Math.round(adaptiveDelay)}ms`, 'warning');
+      }
+      throw error; // Re-throw để caller xử lý retry với key rotation
+    }
   }
 
-  const finalBuffer = new Uint8Array(results.reduce((acc, b) => acc + b.byteLength, 0));
+  const totalLength = results.reduce((acc, b) => acc + b.byteLength, 0);
+  const finalBuffer = new Uint8Array(totalLength);
   let offset = 0;
   for (const res of results) {
     finalBuffer.set(new Uint8Array(res), offset);
@@ -182,100 +312,123 @@ export const generateAudioParallel = async (
   return finalBuffer.buffer;
 };
 
-export const generateContentFromDescription = async (desc: string, systemPrompt: string, onLog: any, apiKey: string) => {
-  await delay(2000); 
-  const ai = new GoogleGenAI({ apiKey });
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: desc,
-    config: { systemInstruction: systemPrompt }
-  });
-  return response.text || "";
-};
-
-export const analyzeVoice = async (base64Audio: string, onLog?: any, apiKey: string = "") => {
-  await delay(3000); 
-  const ai = new GoogleGenAI({ apiKey });
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: {
-      parts: [
-        { inlineData: { data: base64Audio, mimeType: 'audio/wav' } },
-        { text: "Phân tích giọng nói và trả về JSON: {gender, region, suggestedName, description}" }
-      ]
-    },
-    config: { responseMimeType: "application/json" }
-  });
-  return JSON.parse(response.text || "{}");
-};
-
 export const pcmToWav = (pcmBuffer: ArrayBuffer, sampleRate: number = 24000): Blob => {
   const length = pcmBuffer.byteLength;
   const buffer = new ArrayBuffer(44 + length);
   const view = new DataView(buffer);
-  const writeString = (offset: number, string: string) => {
-    for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
-  };
-  writeString(0, 'RIFF');
-  view.setUint32(4, 36 + length, true);
-  writeString(8, 'WAVE');
-  writeString(12, 'fmt ');
-  view.setUint32(16, 16, true);
+  view.setUint32(0, 0x52494646, false); 
+  view.setUint32(4, 36 + length, true); 
+  view.setUint32(8, 0x57415645, false);
+  view.setUint32(12, 0x666d7420, false); 
+  view.setUint32(16, 16, true); 
   view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
+  view.setUint16(22, 1, true); 
+  view.setUint32(24, sampleRate, true); 
   view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeString(36, 'data');
-  view.setUint32(40, length, true);
+  view.setUint16(32, 2, true); 
+  view.setUint16(34, 16, true); 
+  view.setUint32(36, 0x64617461, false);
+  view.setUint32(40, length, true); 
   new Uint8Array(buffer, 44).set(new Uint8Array(pcmBuffer));
   return new Blob([buffer], { type: 'audio/wav' });
 };
 
 export const pcmToMp3 = (pcmBuffer: ArrayBuffer, sampleRate: number = 24000): Blob => {
-  if (!(window as any).lamejs) return pcmToWav(pcmBuffer, sampleRate);
-  const mp3encoder = new (window as any).lamejs.Mp3Encoder(1, sampleRate, 128);
+  const lamejs = (window as any).lamejs;
+  if (!lamejs?.Mp3Encoder) return pcmToWav(pcmBuffer, sampleRate);
+  const encoder = new lamejs.Mp3Encoder(1, sampleRate, 128);
   const samples = new Int16Array(pcmBuffer);
   const mp3Data = [];
-  const sampleBlockSize = 576;
-  for (let i = 0; i < samples.length; i += sampleBlockSize) {
-    const chunk = samples.subarray(i, i + sampleBlockSize);
-    const mp3buf = mp3encoder.encodeBuffer(chunk);
+  for (let i = 0; i < samples.length; i += 1152) {
+    const chunk = samples.subarray(i, i + 1152);
+    const mp3buf = encoder.encodeBuffer(chunk);
     if (mp3buf.length > 0) mp3Data.push(mp3buf);
   }
-  const mp3buf = mp3encoder.flush();
-  if (mp3buf.length > 0) mp3Data.push(mp3buf);
+  const final = encoder.flush();
+  if (final.length > 0) mp3Data.push(final);
   return new Blob(mp3Data, { type: 'audio/mp3' });
 };
 
-export const mixWithBackgroundAudio = async (voiceBuffer: ArrayBuffer, bgBuffer: ArrayBuffer, bgVolume: number = 0.2): Promise<ArrayBuffer> => {
-  const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-  const [voiceAudio, bgAudio] = await Promise.all([
-    audioContext.decodeAudioData(voiceBuffer.slice(0)),
-    audioContext.decodeAudioData(bgBuffer.slice(0))
-  ]);
-  const offlineCtx = new OfflineAudioContext(1, voiceAudio.length, 24000);
-  const voiceSource = offlineCtx.createBufferSource();
-  voiceSource.buffer = voiceAudio;
-  const bgSource = offlineCtx.createBufferSource();
-  bgSource.buffer = bgAudio;
-  bgSource.loop = true;
-  const bgGain = offlineCtx.createGain();
-  bgGain.gain.value = bgVolume;
-  voiceSource.connect(offlineCtx.destination);
-  bgSource.connect(bgGain);
-  bgGain.connect(offlineCtx.destination);
-  voiceSource.start();
-  bgSource.start();
-  const mixedBuffer = await offlineCtx.startRendering();
-  return audioBufferToWav(mixedBuffer);
+export const analyzeVoice = async (rawAudioBuffer: ArrayBuffer, onLog?: (m: string, t: 'info' | 'error') => void, apiKey: string = ""): Promise<any> => {
+  const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+  const audioBuffer = await audioContext.decodeAudioData(rawAudioBuffer.slice(0));
+  const durationToKeep = Math.min(audioBuffer.duration, 20);
+  const framesToKeep = Math.floor(durationToKeep * audioBuffer.sampleRate);
+  const newBuffer = audioContext.createBuffer(audioBuffer.numberOfChannels, framesToKeep, audioBuffer.sampleRate);
+  for (let i = 0; i < audioBuffer.numberOfChannels; i++) {
+    newBuffer.getChannelData(i).set(audioBuffer.getChannelData(i).slice(0, framesToKeep));
+  }
+  const wavBlob = pcmToWav(audioBufferToWav(newBuffer), audioBuffer.sampleRate);
+  const reader = new FileReader();
+  const base64 = await new Promise<string>((resolve) => {
+    reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+    reader.readAsDataURL(wavBlob);
+  });
+
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview', 
+      contents: {
+        parts: [
+          { inlineData: { data: base64, mimeType: 'audio/wav' } },
+          { text: `Analyze this audio. Return JSON: gender ("Nam"/"Nữ"), region ("Bắc"/"Trung"/"Nam"), toneSummary (5 words), suggestedName (Vietnamese), description.` }
+        ]
+      },
+      config: { responseMimeType: "application/json" }
+    });
+    
+    let jsonText = response.text || "{}";
+    jsonText = jsonText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    return JSON.parse(jsonText);
+  } catch (e: any) {
+    throw new Error(handleAiError(e).message);
+  }
 };
 
-export const validateApiKey = async (key: string): Promise<boolean> => {
+function audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
+  const numChannels = buffer.numberOfChannels;
+  const length = buffer.length * numChannels * 2;
+  const result = new ArrayBuffer(length);
+  const view = new DataView(result);
+  const channels = [];
+  for (let i = 0; i < numChannels; i++) channels.push(buffer.getChannelData(i));
+  let offset = 0;
+  for (let i = 0; i < buffer.length; i++) {
+    for (let channel = 0; channel < numChannels; channel++) {
+      let sample = channels[channel][i];
+      sample = Math.max(-1, Math.min(1, sample));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+      offset += 2;
+    }
+  }
+  return result;
+}
+
+export const generateMarketingContent = async (imageBase64: string | null, description: string, onLog?: any, apiKey: string = "") => {
   try {
-    const ai = new GoogleGenAI({ apiKey: key });
-    await ai.models.generateContent({ model: 'gemini-3-flash-preview', contents: 'hi' });
-    return true;
-  } catch { return false; }
+    const ai = new GoogleGenAI({ apiKey });
+    const parts: any[] = [];
+    if (imageBase64) parts.push({ inlineData: { mimeType: 'image/jpeg', data: imageBase64 } });
+    parts.push({ text: `Đóng vai chuyên gia marketing. Dựa trên: "${description}", tạo tiêu đề (dưới 10 từ) và nội dung quảng cáo (30 từ) hấp dẫn. Trả về JSON {title, content}.` });
+    const response = await ai.models.generateContent({ model: 'gemini-3-flash-preview', contents: { parts }, config: { responseMimeType: "application/json" } });
+    
+    let jsonText = response.text || "{}";
+    jsonText = jsonText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    return JSON.parse(jsonText);
+  } catch (e: any) { throw new Error(handleAiError(e).message); }
+};
+
+export const generateAdImage = async (prompt: string, onLog?: any, apiKey: string = "") => {
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: [{ text: `High-quality advertising background: ${prompt}. No text.` }],
+      config: { imageConfig: { aspectRatio: "1:1" } }
+    });
+    const part = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+    if (!part) throw new Error("AI không trả về ảnh.");
+    return `data:image/png;base64,${part.inlineData.data}`;
+  } catch (e: any) { throw new Error(handleAiError(e).message); }
 };
