@@ -505,6 +505,36 @@ const App: React.FC = () => {
              const content = await page.getTextContent();
              text += content.items.map((item: any) => item.str).join(' ') + '\n\n';
            }
+           // Nếu sau khi đọc mà vẫn không có text, nhiều khả năng PDF là dạng scan/hình ảnh
+           if (!text.trim()) {
+             const Tesseract = (window as any).Tesseract;
+             if (!Tesseract) {
+               throw new Error("PDF là file scan/hình ảnh và không chứa lớp văn bản. Vui lòng bật OCR (Tesseract.js) hoặc dùng file .docx/.txt được gõ sẵn.");
+             }
+
+             // Fallback: dùng OCR để đọc tối đa 3 trang đầu tiên cho nhẹ
+             showNotification("Đang xử lý OCR", "PDF là file scan, hệ thống sẽ nhận dạng chữ từ hình ảnh...", "info");
+             let ocrText = "";
+             const maxOcrPages = Math.min(pdf.numPages, 3);
+             for (let i = 1; i <= maxOcrPages; i++) {
+               const page = await pdf.getPage(i);
+               const viewport = page.getViewport({ scale: 2 });
+               const canvas = document.createElement('canvas');
+               const context = canvas.getContext('2d');
+               if (!context) continue;
+               canvas.width = viewport.width;
+               canvas.height = viewport.height;
+               await page.render({ canvasContext: context, viewport }).promise;
+               const dataUrl = canvas.toDataURL('image/png');
+               const result = await Tesseract.recognize(dataUrl, 'vie', {});
+               ocrText += (result?.data?.text || "") + "\n\n";
+             }
+
+             if (!ocrText.trim()) {
+               throw new Error("Không thể nhận dạng chữ từ PDF scan. Vui lòng dùng file .docx hoặc .txt được gõ sẵn.");
+             }
+             text = ocrText;
+           }
          } else {
              throw new Error("Thư viện PDF chưa tải xong. Vui lòng thử lại.");
          }
@@ -516,6 +546,21 @@ const App: React.FC = () => {
          } else {
             throw new Error("Thư viện Word chưa tải xong. Vui lòng thử lại.");
          }
+      } else if (fileType === 'jpg' || fileType === 'jpeg' || fileType === 'png' || fileType === 'webp') {
+         // Ảnh chứa văn bản -> dùng OCR (Tesseract.js) nếu có
+         const Tesseract = (window as any).Tesseract;
+         if (!Tesseract) {
+           throw new Error("Ảnh chứa văn bản (JPG/PNG), vui lòng bật OCR (Tesseract.js) để nhận dạng chữ, hoặc chuyển thành file .docx/.txt.");
+         }
+         showNotification("Đang xử lý OCR", "Hệ thống đang nhận dạng chữ từ ảnh, vui lòng chờ...", "info");
+         const dataUrl = await new Promise<string>((resolve, reject) => {
+           const reader = new FileReader();
+           reader.onload = () => resolve(reader.result as string);
+           reader.onerror = () => reject(new Error("Không thể đọc dữ liệu ảnh."));
+           reader.readAsDataURL(file);
+         });
+         const result = await Tesseract.recognize(dataUrl, 'vie', {});
+         text = (result?.data?.text || "");
       } else if (fileType === 'doc') {
          // Không thể đọc trực tiếp .doc trong trình duyệt, hướng dẫn người dùng chuyển sang .docx
          throw new Error("File .doc (Word cũ) chưa được hỗ trợ. Vui lòng lưu lại thành .docx rồi tải lên.");
