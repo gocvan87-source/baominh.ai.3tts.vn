@@ -470,12 +470,36 @@ const App: React.FC = () => {
       const upper = line.toUpperCase();
       // Bỏ các dòng khai báo giọng đọc hoặc meta đầu file
       if (upper.startsWith("GIỌNG ") || upper.startsWith("GIONG ") || upper.startsWith("VOICE ")) continue;
+      // Bỏ các dòng scan tool
+      if (upper.includes("SCANNED WITH") || upper.includes("Camscanner".toUpperCase())) continue;
       contentLines.push(line);
     }
 
     if (contentLines.length === 0) return raw.trim();
 
-    // Dòng đầu tiên là tiêu đề, phần còn lại là nội dung
+    // TRƯỜNG HỢP VĂN BẢN HÀNH CHÍNH CÓ "THÔNG BÁO"
+    const thongBaoIndex = contentLines.findIndex(l => l.toUpperCase().includes("THÔNG BÁO"));
+    if (thongBaoIndex !== -1) {
+      const titleLine = "THÔNG BÁO";
+      const subtitleLine = (contentLines[thongBaoIndex + 1] || "").trim();
+
+      // Phần thân: từ sau subtitle đến trước "Nơi nhận"
+      const bodySource = contentLines.slice(thongBaoIndex + 2);
+      const bodyLines: string[] = [];
+      for (const l of bodySource) {
+        const upper = l.toUpperCase();
+        if (upper.startsWith("NƠI NHẬN") || upper.startsWith("NOI NHAN")) break;
+        if (upper.includes("SCANNED WITH") || upper.includes("CAMSCANNER")) break;
+        bodyLines.push(l);
+      }
+
+      const cleanTitle = subtitleLine ? `${titleLine}\n${subtitleLine}` : titleLine;
+      const body = bodyLines.join("\n").trim();
+      if (!body) return cleanTitle;
+      return `${cleanTitle}\n\n${body}`;
+    }
+
+    // Mặc định: Dòng đầu tiên là tiêu đề, phần còn lại là nội dung
     const title = contentLines[0];
     const body = contentLines.slice(1).join("\n").trim();
 
