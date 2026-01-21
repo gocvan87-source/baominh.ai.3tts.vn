@@ -139,6 +139,8 @@ const App: React.FC = () => {
   const [selectedPlan, setSelectedPlan] = useState<{ label: string; plan: string; price: number; months: number } | null>(null);
   const [isCheckingPayment, setIsCheckingPayment] = useState(false);
   const [paymentCheckInterval, setPaymentCheckInterval] = useState<NodeJS.Timeout | null>(null);
+  const [lastCheckedExpiry, setLastCheckedExpiry] = useState<number>(0);
+  const [lastCheckedPlanType, setLastCheckedPlanType] = useState<string>("");
   const [isAIPromptOpen, setIsAIPromptOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   
@@ -736,6 +738,11 @@ const App: React.FC = () => {
   const handleSelectPlan = (plan: { label: string; plan: string; price: number; months: number }) => {
     setSelectedPlan(plan);
     addLog(`Đã chọn gói ${plan.label} - ${plan.price.toLocaleString()}đ. Vui lòng quét QR để thanh toán.`, "info");
+    // Reset lastChecked để bắt đầu kiểm tra mới
+    if (currentUser) {
+      setLastCheckedExpiry(currentUser.expiryDate || 0);
+      setLastCheckedPlanType(currentUser.planType || "");
+    }
     // Bắt đầu polling kiểm tra thanh toán mỗi 5 giây
     startPaymentPolling();
   };
@@ -755,30 +762,41 @@ const App: React.FC = () => {
         return false;
       }
 
-      // So sánh để phát hiện thay đổi
-      const oldExpiry = currentUser.expiryDate || 0;
-      const oldPlanType = currentUser.planType || "";
+      // So sánh với giá trị đã kiểm tra lần trước (tránh lặp vô hạn)
+      const oldExpiry = lastCheckedExpiry || currentUser.expiryDate || 0;
+      const oldPlanType = lastCheckedPlanType || currentUser.planType || "";
       const newExpiry = data.user.expiryDate || 0;
       const newPlanType = data.user.planType || "";
 
       // Log để debug
       console.log("Payment check:", {
-        oldExpiry: oldExpiry ? new Date(oldExpiry).toLocaleString('vi-VN') : 'N/A',
+        lastCheckedExpiry: lastCheckedExpiry ? new Date(lastCheckedExpiry).toLocaleString('vi-VN') : 'N/A',
+        currentUserExpiry: currentUser.expiryDate ? new Date(currentUser.expiryDate).toLocaleString('vi-VN') : 'N/A',
         newExpiry: newExpiry ? new Date(newExpiry).toLocaleString('vi-VN') : 'N/A',
-        oldPlanType: oldPlanType || 'N/A',
+        lastCheckedPlanType: lastCheckedPlanType || 'N/A',
+        currentUserPlanType: currentUser.planType || 'N/A',
         newPlanType: newPlanType || 'N/A',
         expiryChanged: newExpiry > oldExpiry,
-        planTypeChanged: newPlanType && newPlanType !== oldPlanType,
-        hasChange: newExpiry > oldExpiry || (newPlanType && newPlanType !== oldPlanType)
+        planTypeChanged: newPlanType && newPlanType !== oldPlanType
       });
 
-      // Phát hiện thay đổi: expiryDate tăng HOẶC planType thay đổi (và không rỗng)
-      const expiryChanged = newExpiry > 0 && newExpiry > oldExpiry;
-      const planTypeChanged = newPlanType && newPlanType !== oldPlanType;
+      // Phát hiện thay đổi: expiryDate tăng đáng kể HOẶC planType thay đổi
+      // Nếu oldExpiry = 0 (chưa có gói), thì bất kỳ newExpiry > 0 nào cũng là thay đổi
+      // Nếu đã có expiryDate, chỉ phát hiện nếu tăng ít nhất 1 ngày (tránh false positive)
+      const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+      const expiryChanged = newExpiry > 0 && (
+        oldExpiry === 0 || // Chưa có gói trước đó
+        (newExpiry - oldExpiry) > ONE_DAY_MS // Tăng ít nhất 1 ngày
+      );
+      const planTypeChanged = newPlanType && newPlanType !== oldPlanType && newPlanType !== "";
       
       if (expiryChanged || planTypeChanged) {
         // Thanh toán thành công! Cập nhật user
         addLog(`Phát hiện thay đổi gói! Đang cập nhật thông tin...`, "info");
+        
+        // Cập nhật lastChecked ngay để tránh lặp
+        setLastCheckedExpiry(newExpiry);
+        setLastCheckedPlanType(newPlanType);
         
         // Reload user data từ DB
         const dbUsers = await loadFromDb('users');
@@ -806,9 +824,17 @@ const App: React.FC = () => {
             setSelectedPlan(null);
             stopPaymentPolling();
             return true;
+          } else {
+            addLog(`⚠️ Không tìm thấy user trong DB sau khi cập nhật.`, "warning");
           }
+        } else {
+          addLog(`⚠️ Không thể tải danh sách users từ DB.`, "warning");
         }
       } else {
+        // Cập nhật lastChecked ngay cả khi chưa có thay đổi (để tránh false positive)
+        if (newExpiry > 0) setLastCheckedExpiry(newExpiry);
+        if (newPlanType) setLastCheckedPlanType(newPlanType);
+        
         if (showLog) addLog(`Chưa có thay đổi. Tiếp tục theo dõi...`, "info");
       }
       
@@ -866,6 +892,7 @@ const App: React.FC = () => {
       setPaymentCheckInterval(null);
     }
     setIsCheckingPayment(false);
+    // Không reset lastChecked ở đây vì có thể user muốn kiểm tra lại sau
   };
 
   // Cleanup polling khi đóng modal hoặc unmount
