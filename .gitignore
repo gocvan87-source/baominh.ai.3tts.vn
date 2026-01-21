@@ -1,39 +1,30 @@
-# Dependencies
-node_modules/
-# package-lock.json - NÊN COMMIT để đảm bảo version dependencies nhất quán
-
-# Build output
-dist/
-build/
-
-# Environment variables
-.env
-.env.local
-.env.production
-.env.development
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
 # Logs
+logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
-# Testing
-coverage/
-.nyc_output/
+# Node modules
+node_modules
+dist
+dist-ssr
+*.local
 
-# Temporary files
-*.tmp
-*.temp
-.cache/
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs
+*.njsproj
+*.sln
+*.sw?
+
+# Environment variables
+.env
+.env.*
+!.env.example
