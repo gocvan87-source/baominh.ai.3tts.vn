@@ -140,16 +140,23 @@ function addMonths(from, monthCount) {
 // Webhook nhận từ SePay
 app.post('/api/sepay_webhook', async (req, res) => {
   try {
+    console.log("📥 Webhook SePay được gọi!");
+    console.log("📥 Headers:", JSON.stringify(req.headers, null, 2));
+    console.log("📥 Body:", JSON.stringify(req.body, null, 2));
+    
     // 1. Xác thực API key
-    const auth = req.headers["authorization"] || "";
-    const token = auth.replace(/^sepay\s+/i, "").replace(/^apikey\s+/i, "").trim();
-    if (!SEPAY_WEBHOOK_API_KEY || token !== SEPAY_WEBHOOK_API_KEY) {
+    const auth = req.headers["authorization"] || req.headers["x-api-key"] || "";
+    const token = auth.replace(/^sepay\s+/i, "").replace(/^apikey\s+/i, "").replace(/^Bearer\s+/i, "").trim();
+    
+    console.log(`🔑 API Key check: SEPAY_WEBHOOK_API_KEY=${SEPAY_WEBHOOK_API_KEY ? 'SET' : 'NOT SET'}, token=${token ? 'PROVIDED' : 'NOT PROVIDED'}`);
+    
+    // Nếu không có API key được cấu hình, cho phép test (chỉ trong dev)
+    if (SEPAY_WEBHOOK_API_KEY && token !== SEPAY_WEBHOOK_API_KEY) {
       console.log("❌ Webhook: Invalid API key");
       return res.status(401).json({ error: "Invalid webhook api key" });
     }
 
     const payload = req.body;
-    console.log("📥 Webhook SePay nhận được:", JSON.stringify(payload, null, 2));
 
     // 2. Đọc thông tin giao dịch từ payload
     const amount = parseInt(payload.amount || payload.money || 0);
@@ -259,18 +266,40 @@ app.post('/api/sepay_webhook', async (req, res) => {
 app.get('/api/check_payment/:loginId', async (req, res) => {
   try {
     const { loginId } = req.params;
+    console.log(`🔍 Check payment request for loginId: ${loginId}`);
+    
     const usersRes = await pool.query('SELECT data FROM bm_settings WHERE id = $1', ['users']);
     if (usersRes.rows.length === 0) {
+      console.log(`ℹ️ Users table not found`);
       return res.json({ found: false });
     }
     const allUsers = usersRes.rows[0].data || [];
-    const user = allUsers.find(u => u.loginId?.toLowerCase() === loginId.toLowerCase());
+    const user = allUsers.find(u => {
+      const uLoginId = (u.loginId || u.uid || "").toLowerCase();
+      return uLoginId === loginId.toLowerCase();
+    });
+    
     if (!user) {
+      console.log(`ℹ️ User not found for loginId: ${loginId}`);
       return res.json({ found: false });
     }
+    
+    console.log(`✅ User found: ${user.loginId || user.uid}, planType: ${user.planType}, expiryDate: ${new Date(user.expiryDate || 0).toLocaleString('vi-VN')}`);
     return res.json({ found: true, user });
   } catch (err) {
     console.error("❌ Check payment error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// API: Test webhook (để debug)
+app.post('/api/test_webhook', async (req, res) => {
+  try {
+    console.log("🧪 Test webhook called with body:", JSON.stringify(req.body, null, 2));
+    console.log("🧪 Headers:", JSON.stringify(req.headers, null, 2));
+    return res.json({ ok: true, message: "Test webhook received", body: req.body, headers: req.headers });
+  } catch (err) {
+    console.error("❌ Test webhook error:", err);
     return res.status(500).json({ error: err.message });
   }
 });

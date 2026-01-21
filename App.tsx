@@ -740,6 +740,86 @@ const App: React.FC = () => {
     startPaymentPolling();
   };
 
+  const checkPaymentStatus = async (showLog = true) => {
+    if (!currentUser) return false;
+
+    try {
+      const loginId = currentUser.loginId || currentUser.uid;
+      if (showLog) addLog(`Đang kiểm tra thanh toán cho ${loginId}...`, "info");
+      
+      const res = await fetch(`/api/check_payment/${loginId}`);
+      const data = await res.json();
+      
+      if (!data.found || !data.user) {
+        if (showLog) addLog(`Chưa tìm thấy thông tin thanh toán.`, "warning");
+        return false;
+      }
+
+      // So sánh để phát hiện thay đổi
+      const oldExpiry = currentUser.expiryDate || 0;
+      const oldPlanType = currentUser.planType || "";
+      const newExpiry = data.user.expiryDate || 0;
+      const newPlanType = data.user.planType || "";
+
+      // Log để debug
+      console.log("Payment check:", {
+        oldExpiry: oldExpiry ? new Date(oldExpiry).toLocaleString('vi-VN') : 'N/A',
+        newExpiry: newExpiry ? new Date(newExpiry).toLocaleString('vi-VN') : 'N/A',
+        oldPlanType: oldPlanType || 'N/A',
+        newPlanType: newPlanType || 'N/A',
+        expiryChanged: newExpiry > oldExpiry,
+        planTypeChanged: newPlanType && newPlanType !== oldPlanType,
+        hasChange: newExpiry > oldExpiry || (newPlanType && newPlanType !== oldPlanType)
+      });
+
+      // Phát hiện thay đổi: expiryDate tăng HOẶC planType thay đổi (và không rỗng)
+      const expiryChanged = newExpiry > 0 && newExpiry > oldExpiry;
+      const planTypeChanged = newPlanType && newPlanType !== oldPlanType;
+      
+      if (expiryChanged || planTypeChanged) {
+        // Thanh toán thành công! Cập nhật user
+        addLog(`Phát hiện thay đổi gói! Đang cập nhật thông tin...`, "info");
+        
+        // Reload user data từ DB
+        const dbUsers = await loadFromDb('users');
+        if (dbUsers && Array.isArray(dbUsers)) {
+          const updatedUser = dbUsers.find((u: any) => u.uid === currentUser.uid);
+          if (updatedUser) {
+            setCurrentUser(updatedUser);
+            setAllUsers(dbUsers);
+            localStorage.setItem('bm_user_session', JSON.stringify(updatedUser));
+            
+            const expiryDateStr = new Date(updatedUser.expiryDate || newExpiry).toLocaleDateString('vi-VN', {
+              day: '2-digit',
+              month: '2-digit',
+              year: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit'
+            });
+            
+            showNotification(
+              "🎉 Thanh toán thành công!", 
+              `Gói ${updatedUser.planType || newPlanType} đã được kích hoạt. Hạn dùng đến ${expiryDateStr}.`, 
+              "success"
+            );
+            addLog(`✅ Thanh toán thành công! Gói ${updatedUser.planType || newPlanType} đã được kích hoạt. Hạn dùng: ${expiryDateStr}`, "info");
+            setSelectedPlan(null);
+            stopPaymentPolling();
+            return true;
+          }
+        }
+      } else {
+        if (showLog) addLog(`Chưa có thay đổi. Tiếp tục theo dõi...`, "info");
+      }
+      
+      return false;
+    } catch (err: any) {
+      console.error("Lỗi kiểm tra thanh toán:", err);
+      if (showLog) addLog(`Lỗi kiểm tra: ${err.message}`, "error");
+      return false;
+    }
+  };
+
   const startPaymentPolling = () => {
     // Dừng polling cũ nếu có
     if (paymentCheckInterval) {
@@ -747,6 +827,11 @@ const App: React.FC = () => {
     }
 
     setIsCheckingPayment(true);
+    addLog("Bắt đầu kiểm tra thanh toán tự động (mỗi 5 giây)...", "info");
+    
+    // Kiểm tra ngay lập tức
+    checkPaymentStatus(false);
+    
     const interval = setInterval(async () => {
       if (!currentUser) {
         clearInterval(interval);
@@ -754,44 +839,11 @@ const App: React.FC = () => {
         return;
       }
 
-      try {
-        const loginId = currentUser.loginId || currentUser.uid;
-        const res = await fetch(`/api/check_payment/${loginId}`);
-        const data = await res.json();
-        
-        if (data.found && data.user) {
-          // So sánh expiryDate để phát hiện thay đổi
-          const oldExpiry = currentUser.expiryDate || 0;
-          const newExpiry = data.user.expiryDate || 0;
-          
-          if (newExpiry > oldExpiry || data.user.planType !== currentUser.planType) {
-            // Thanh toán thành công! Cập nhật user
-            clearInterval(interval);
-            setIsCheckingPayment(false);
-            setPaymentCheckInterval(null);
-            
-            // Reload user data từ DB
-            const dbUsers = await loadFromDb('users');
-            if (dbUsers && Array.isArray(dbUsers)) {
-              const updatedUser = dbUsers.find((u: any) => u.uid === currentUser.uid);
-              if (updatedUser) {
-                setCurrentUser(updatedUser);
-                setAllUsers(dbUsers);
-                localStorage.setItem('bm_user_session', JSON.stringify(updatedUser));
-                
-                showNotification(
-                  "🎉 Thanh toán thành công!", 
-                  `Gói ${data.user.planType} đã được kích hoạt. Hạn dùng đến ${new Date(newExpiry).toLocaleDateString('vi-VN')}.`, 
-                  "success"
-                );
-                addLog(`Thanh toán thành công! Gói ${data.user.planType} đã được kích hoạt.`, "info");
-                setSelectedPlan(null);
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.error("Lỗi kiểm tra thanh toán:", err);
+      const success = await checkPaymentStatus(false);
+      if (success) {
+        clearInterval(interval);
+        setIsCheckingPayment(false);
+        setPaymentCheckInterval(null);
       }
     }, 5000); // Kiểm tra mỗi 5 giây
 
@@ -799,9 +851,12 @@ const App: React.FC = () => {
     
     // Tự động dừng sau 10 phút (120 lần * 5s)
     setTimeout(() => {
-      clearInterval(interval);
-      setIsCheckingPayment(false);
-      setPaymentCheckInterval(null);
+      if (paymentCheckInterval === interval) {
+        clearInterval(interval);
+        setIsCheckingPayment(false);
+        setPaymentCheckInterval(null);
+        addLog("Đã dừng kiểm tra tự động sau 10 phút. Vui lòng bấm 'Kiểm tra thủ công' nếu đã thanh toán.", "warning");
+      }
     }, 600000);
   };
 
@@ -1548,7 +1603,7 @@ const App: React.FC = () => {
                     </p>
                   </div>
                 )}
-                <div className="flex gap-3 justify-center">
+                <div className="flex gap-3 justify-center flex-wrap">
                   <button
                     onClick={() => { setSelectedPlan(null); stopPaymentPolling(); }}
                     className="px-6 py-2.5 bg-slate-100 text-slate-600 rounded-xl text-[11px] font-black uppercase hover:bg-slate-200"
@@ -1560,6 +1615,13 @@ const App: React.FC = () => {
                     className="px-6 py-2.5 bg-emerald-600 text-white rounded-xl text-[11px] font-black uppercase shadow-md hover:bg-emerald-700"
                   >
                     Mở QR trong tab mới
+                  </button>
+                  <button
+                    onClick={() => checkPaymentStatus(true)}
+                    className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-[11px] font-black uppercase shadow-md hover:bg-indigo-700 flex items-center gap-2"
+                  >
+                    <Loader2 className={`w-4 h-4 ${isCheckingPayment ? 'animate-spin' : ''}`} />
+                    Kiểm tra thanh toán
                   </button>
                 </div>
               </div>
