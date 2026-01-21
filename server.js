@@ -145,24 +145,68 @@ app.post('/api/sepay_webhook', async (req, res) => {
     console.log("📥 Body:", JSON.stringify(req.body, null, 2));
     
     // 1. Xác thực API key
-    const auth = req.headers["authorization"] || req.headers["x-api-key"] || "";
-    const token = auth.replace(/^sepay\s+/i, "").replace(/^apikey\s+/i, "").replace(/^Bearer\s+/i, "").trim();
+    // SePay gửi với format: Authorization: "Apikey {API_KEY}"
+    const authHeader = req.headers["authorization"] || req.headers["x-api-key"] || "";
+    let token = "";
     
-    console.log(`🔑 API Key check: SEPAY_WEBHOOK_API_KEY=${SEPAY_WEBHOOK_API_KEY ? 'SET' : 'NOT SET'}, token=${token ? 'PROVIDED' : 'NOT PROVIDED'}`);
+    // Xử lý các format: "Apikey {key}", "apikey {key}", "Bearer {key}", hoặc chỉ {key}
+    if (authHeader) {
+      token = authHeader
+        .replace(/^apikey\s+/i, "")
+        .replace(/^bearer\s+/i, "")
+        .replace(/^sepay\s+/i, "")
+        .trim();
+    }
     
-    // Nếu không có API key được cấu hình, cho phép test (chỉ trong dev)
-    if (SEPAY_WEBHOOK_API_KEY && token !== SEPAY_WEBHOOK_API_KEY) {
-      console.log("❌ Webhook: Invalid API key");
-      return res.status(401).json({ error: "Invalid webhook api key" });
+    console.log(`🔑 API Key check: SEPAY_WEBHOOK_API_KEY=${SEPAY_WEBHOOK_API_KEY ? 'SET (' + SEPAY_WEBHOOK_API_KEY.substring(0, 10) + '...)' : 'NOT SET'}, received_token=${token ? 'PROVIDED (' + token.substring(0, 10) + '...)' : 'NOT PROVIDED'}`);
+    console.log(`🔑 Full auth header: "${authHeader}"`);
+    
+    // Nếu có API key được cấu hình, phải khớp
+    if (SEPAY_WEBHOOK_API_KEY) {
+      if (token !== SEPAY_WEBHOOK_API_KEY) {
+        console.log("❌ Webhook: Invalid API key - không khớp");
+        return res.status(401).json({ error: "Invalid webhook api key" });
+      }
+      console.log("✅ Webhook: API key hợp lệ");
+    } else {
+      console.log("⚠️ Webhook: Không có SEPAY_WEBHOOK_API_KEY được cấu hình, cho phép tất cả (chế độ dev)");
     }
 
     const payload = req.body;
 
     // 2. Đọc thông tin giao dịch từ payload
-    const amount = parseInt(payload.amount || payload.money || 0);
-    const description = (payload.description || payload.content || payload.note || "").toString();
-    const status = (payload.status || "").toLowerCase();
-    const transId = String(payload.transId || payload.id || payload.transaction_id || "");
+    // SePay có thể gửi với nhiều format khác nhau
+    const amount = parseInt(
+      payload.amount || 
+      payload.money || 
+      payload.amount_money ||
+      payload.total ||
+      0
+    );
+    const description = (
+      payload.description || 
+      payload.content || 
+      payload.note || 
+      payload.message ||
+      payload.transaction_content ||
+      ""
+    ).toString();
+    const status = (
+      payload.status || 
+      payload.state ||
+      payload.transaction_status ||
+      ""
+    ).toLowerCase();
+    const transId = String(
+      payload.transId || 
+      payload.id || 
+      payload.transaction_id ||
+      payload.trans_id ||
+      payload.code ||
+      ""
+    );
+    
+    console.log(`📊 Transaction info: amount=${amount}, status="${status}", transId="${transId}", description="${description.substring(0, 100)}"`);
 
     // Chỉ xử lý giao dịch thành công
     if (!["success", "thanh_cong", "completed", "thanh toán thành công"].includes(status)) {
@@ -249,12 +293,21 @@ app.post('/api/sepay_webhook', async (req, res) => {
       ['payment_logs', JSON.stringify(paymentLogs)]
     );
 
-    console.log(`✅ Webhook: Đã cập nhật gói ${plan.planType} cho user ${loginId}, hạn dùng đến ${new Date(newExpiry).toLocaleString('vi-VN')}`);
+    const expiryDateStr = new Date(newExpiry).toLocaleString('vi-VN');
+    console.log(`✅ Webhook: Đã cập nhật gói ${plan.planType} cho user ${loginId}, hạn dùng đến ${expiryDateStr}`);
     
     return res.status(200).json({ 
+      success: true,
       ok: true, 
       message: `Payment processed for ${loginId}`,
-      user: { uid: updatedUser.uid, planType: updatedUser.planType, expiryDate: updatedUser.expiryDate }
+      data: {
+        loginId,
+        planType: plan.planType,
+        months: plan.months,
+        expiryDate: newExpiry,
+        expiryDateStr,
+        transId
+      }
     });
   } catch (err) {
     console.error("❌ Webhook error:", err);
