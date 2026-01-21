@@ -48,6 +48,10 @@ const PLAN_LIMITS: Record<string, number> = {
   'ADMIN': 99999999
 };
 
+// Link QR thanh toán SePay (trang hiển thị QR để người dùng quét)
+// Bạn có thể thay bằng link Payment/QR thực tế do SePay cung cấp.
+const SEPAY_QR_URL = "https://qr.sepay.vn/img?acc=VQRQAGPFR0030&bank=MBBank"; // TODO: thay bằng link QR cố định của tài khoản bạn
+
 const formatTime = (time: number) => {
   if (isNaN(time)) return "00:00";
   const mins = Math.floor(time / 60);
@@ -132,6 +136,7 @@ const App: React.FC = () => {
   const [clonedVoices, setClonedVoices] = useState<ClonedVoice[]>([]);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
+  const [selectedPlan, setSelectedPlan] = useState<{ label: string; plan: string; price: number; months: number } | null>(null);
   const [isAIPromptOpen, setIsAIPromptOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   
@@ -713,6 +718,24 @@ const App: React.FC = () => {
     setEditingVoice(null);
   };
 
+  const getSepayQRUrl = (amount: number): string => {
+    if (!currentUser) return "";
+    const code = `VT-${currentUser.loginId || currentUser.uid}`;
+    const base = "https://qr.sepay.vn/img";
+    const params = new URLSearchParams({
+      acc: "VQRQAGPFR0030",
+      bank: "MBBank",
+      amount: String(amount),
+      des: code
+    });
+    return `${base}?${params.toString()}`;
+  };
+
+  const handleSelectPlan = (plan: { label: string; plan: string; price: number; months: number }) => {
+    setSelectedPlan(plan);
+    addLog(`Đã chọn gói ${plan.label} - ${plan.price.toLocaleString()}đ. Vui lòng quét QR để thanh toán.`, "info");
+  };
+
   const handleGenerateAdContent = async () => {
     if (!adDescription.trim()) return;
     setIsGeneratingAd(true);
@@ -1032,6 +1055,13 @@ const App: React.FC = () => {
               {showProfileMenu && (
                 <div className="absolute right-0 mt-3 w-64 bg-white rounded-2xl shadow-2xl border p-2 z-[70] animate-in fade-in">
                   <div className="p-3 bg-slate-50 rounded-xl mb-1 flex items-center justify-between"><span className="text-[10px] font-black text-slate-500 uppercase">Gói: {currentUser.planType}</span><Zap className="w-3 h-3 text-amber-500"/></div>
+                  <button
+                    onClick={() => { setIsPricingModalOpen(true); setShowProfileMenu(false); }}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-[11px] font-bold text-slate-600 hover:bg-emerald-50 rounded-xl"
+                  >
+                    <CalendarClock className="w-4 h-4 text-emerald-500" />
+                    Gói cước & Thanh toán
+                  </button>
                   {currentUser.role === 'ADMIN' && <button onClick={() => { setActiveMode(ReadingMode.ADMIN_PANEL); setShowProfileMenu(false); }} className="w-full flex items-center gap-3 px-4 py-3 text-[11px] font-bold text-slate-600 hover:bg-indigo-50 rounded-xl"><LayoutDashboard className="w-4 h-4"/> Admin Panel</button>}
                   <button onClick={() => { setCurrentUser(null); localStorage.removeItem('bm_user_session'); setIsAuthModalOpen(true); }} className="w-full flex items-center gap-3 px-4 py-3 text-[11px] font-bold text-red-500 hover:bg-red-50 rounded-xl mt-1"><LogOut className="w-4 h-4"/> Đăng xuất</button>
                 </div>
@@ -1360,6 +1390,89 @@ const App: React.FC = () => {
       <footer className="h-14 bg-slate-900 text-white flex items-center px-8 z-[120] border-t border-white/5"><div className="flex items-center gap-5 flex-1 overflow-hidden"><Terminal className="w-5 h-5 text-indigo-400 shrink-0"/><p className="text-[11px] font-black uppercase tracking-widest truncate text-slate-500">{logs.length > 0 ? `[${new Date(logs[logs.length-1].timestamp).toLocaleTimeString()}] ${logs[logs.length-1].message}` : "Hệ thống sẵn sàng..."}</p></div><span className="text-[10px] font-black text-indigo-400 uppercase tracking-[0.3em]">Studio Pro v2.9</span></footer>
       
       <div className="fixed bottom-16 right-10 z-[100] flex flex-col items-end gap-5">{isChatOpen && (<div className="w-80 bg-white rounded-[2.5rem] shadow-2xl border-4 border-white flex flex-col overflow-hidden animate-in slide-in-from-bottom-10"><div className="p-6 bg-indigo-600 text-white flex justify-between items-center font-black uppercase text-[10px]">Hỗ trợ kỹ thuật <button onClick={() => setIsChatOpen(false)}><X className="w-5 h-5"/></button></div><div className="p-8 text-center bg-slate-50"><img src={ZALO_QR_URL} className="w-40 h-40 mx-auto rounded-3xl p-2 bg-white shadow-lg mb-6"/><a href={ZALO_LINK} target="_blank" className="block w-full py-4 bg-indigo-600 text-white rounded-2xl text-[11px] font-black uppercase shadow-lg">Mở Zalo nhắn tin</a></div></div>)}<button onClick={() => setIsChatOpen(!isChatOpen)} className="w-20 h-20 bg-amber-500 text-white rounded-[2rem] shadow-2xl flex items-center justify-center hover:scale-110 active:scale-90 transition-all border-4 border-white"><MessageCircle className="w-10 h-10"/></button></div>
+
+      {isPricingModalOpen && currentUser && (
+        <div className="fixed inset-0 z-[180] flex items-center justify-center p-6 bg-slate-900/80 backdrop-blur-md animate-in fade-in">
+          <div className="bg-white w-full max-w-2xl rounded-[3rem] p-10 shadow-2xl relative">
+            <button onClick={() => { setIsPricingModalOpen(false); setSelectedPlan(null); }} className="absolute top-6 right-6 text-slate-300 hover:text-red-500">
+              <X className="w-7 h-7" />
+            </button>
+            
+            {!selectedPlan ? (
+              <>
+                <div className="mb-6">
+                  <p className="text-xs font-black uppercase text-slate-400 mb-1">Tài khoản</p>
+                  <p className="text-lg font-black text-slate-800">{currentUser.displayName}</p>
+                  <p className="text-[11px] font-mono text-slate-500 mt-1">
+                    Mã thanh toán: <span className="font-bold text-indigo-600">VT-{currentUser.loginId || currentUser.uid}</span>
+                  </p>
+                </div>
+                <p className="text-xs font-black uppercase text-slate-400 mb-3">Chọn gói cước</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                  {[
+                    { label: "1 tháng", plan: "MONTHLY", price: 150000, months: 1 },
+                    { label: "3 tháng", plan: "3MONTHS", price: 450000, months: 3 },
+                    { label: "6 tháng", plan: "6MONTHS", price: 900000, months: 6 },
+                    { label: "12 tháng", plan: "YEARLY", price: 1800000, months: 12 },
+                  ].map(p => (
+                    <div key={p.plan} className={`p-4 border-2 rounded-2xl flex flex-col justify-between transition-all cursor-pointer ${selectedPlan?.plan === p.plan ? 'bg-emerald-50 border-emerald-400' : 'bg-slate-50 border-slate-200 hover:border-emerald-300'}`}>
+                      <div>
+                        <p className="text-sm font-black text-slate-800">{p.label}</p>
+                        <p className="text-lg font-black text-emerald-600 mt-1">{p.price.toLocaleString()}đ</p>
+                        <p className="text-[11px] text-slate-500 mt-1">Mỗi ngày 50.000 ký tự</p>
+                      </div>
+                      <button
+                        onClick={() => handleSelectPlan(p)}
+                        className="mt-3 w-full py-2.5 bg-emerald-600 text-white rounded-xl text-[11px] font-black uppercase shadow-md hover:bg-emerald-700"
+                      >
+                        Chọn gói này
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Sau khi quét QR và thanh toán thành công, hệ thống sẽ tự động cộng thêm thời gian sử dụng cho tài khoản của bạn
+                  trong vài phút dựa trên số tiền và mã thanh toán <span className="font-mono font-bold">VT-{currentUser.loginId || currentUser.uid}</span>.
+                </p>
+              </>
+            ) : (
+              <div className="text-center">
+                <h3 className="text-xl font-black text-slate-800 mb-2">Thanh toán gói {selectedPlan.label}</h3>
+                <p className="text-sm text-slate-600 mb-6">
+                  Số tiền: <span className="font-black text-emerald-600 text-lg">{selectedPlan.price.toLocaleString()}đ</span>
+                </p>
+                <div className="bg-white p-6 rounded-2xl border-2 border-emerald-200 inline-block mb-4">
+                  <img 
+                    src={getSepayQRUrl(selectedPlan.price)} 
+                    alt="QR Code SePay" 
+                    className="w-64 h-64 mx-auto"
+                  />
+                </div>
+                <p className="text-[11px] text-slate-500 mb-2">
+                  Quét QR code bằng app ngân hàng để thanh toán
+                </p>
+                <p className="text-[10px] font-mono text-slate-400 mb-4">
+                  Mã thanh toán: <span className="font-bold text-indigo-600">VT-{currentUser.loginId || currentUser.uid}</span>
+                </p>
+                <div className="flex gap-3 justify-center">
+                  <button
+                    onClick={() => setSelectedPlan(null)}
+                    className="px-6 py-2.5 bg-slate-100 text-slate-600 rounded-xl text-[11px] font-black uppercase hover:bg-slate-200"
+                  >
+                    Chọn gói khác
+                  </button>
+                  <button
+                    onClick={() => window.open(getSepayQRUrl(selectedPlan.price), "_blank")}
+                    className="px-6 py-2.5 bg-emerald-600 text-white rounded-xl text-[11px] font-black uppercase shadow-md hover:bg-emerald-700"
+                  >
+                    Mở QR trong tab mới
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {isAuthModalOpen && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-slate-900/90 backdrop-blur-3xl animate-in fade-in">
