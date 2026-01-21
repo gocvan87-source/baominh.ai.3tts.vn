@@ -770,14 +770,17 @@ const App: React.FC = () => {
 
       // Log để debug
       console.log("Payment check:", {
+        loginId,
+        currentUserUid: currentUser.uid,
         lastCheckedExpiry: lastCheckedExpiry ? new Date(lastCheckedExpiry).toLocaleString('vi-VN') : 'N/A',
         currentUserExpiry: currentUser.expiryDate ? new Date(currentUser.expiryDate).toLocaleString('vi-VN') : 'N/A',
         newExpiry: newExpiry ? new Date(newExpiry).toLocaleString('vi-VN') : 'N/A',
         lastCheckedPlanType: lastCheckedPlanType || 'N/A',
         currentUserPlanType: currentUser.planType || 'N/A',
         newPlanType: newPlanType || 'N/A',
-        expiryChanged: newExpiry > oldExpiry,
-        planTypeChanged: newPlanType && newPlanType !== oldPlanType
+        expiryChanged: newExpiry > 0 && (oldExpiry === 0 || (newExpiry - oldExpiry) > 24 * 60 * 60 * 1000),
+        planTypeChanged: newPlanType && newPlanType !== oldPlanType && newPlanType !== "",
+        dataUser: data.user
       });
 
       // Phát hiện thay đổi: expiryDate tăng đáng kể HOẶC planType thay đổi
@@ -798,38 +801,70 @@ const App: React.FC = () => {
         setLastCheckedExpiry(newExpiry);
         setLastCheckedPlanType(newPlanType);
         
-        // Reload user data từ DB
+        // Dùng trực tiếp data.user từ API (đã được cập nhật từ webhook)
+        // Merge để giữ lại các field khác của currentUser (displayName, email, photoURL, etc.)
+        const updatedUser: UserProfile = {
+          ...currentUser,
+          ...data.user,
+          expiryDate: newExpiry,
+          planType: newPlanType,
+          // Đảm bảo các field quan trọng không bị mất
+          uid: currentUser.uid,
+          loginId: currentUser.loginId || data.user.loginId || loginId,
+          displayName: currentUser.displayName || data.user.displayName || currentUser.loginId || loginId,
+        };
+        
+        // Cập nhật state và localStorage
+        setCurrentUser(updatedUser);
+        localStorage.setItem('bm_user_session', JSON.stringify(updatedUser));
+        
+        // Cập nhật trong allUsers array
         const dbUsers = await loadFromDb('users');
         if (dbUsers && Array.isArray(dbUsers)) {
-          const updatedUser = dbUsers.find((u: any) => u.uid === currentUser.uid);
-          if (updatedUser) {
-            setCurrentUser(updatedUser);
-            setAllUsers(dbUsers);
-            localStorage.setItem('bm_user_session', JSON.stringify(updatedUser));
-            
-            const expiryDateStr = new Date(updatedUser.expiryDate || newExpiry).toLocaleDateString('vi-VN', {
-              day: '2-digit',
-              month: '2-digit',
-              year: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit'
-            });
-            
-            showNotification(
-              "🎉 Thanh toán thành công!", 
-              `Gói ${updatedUser.planType || newPlanType} đã được kích hoạt. Hạn dùng đến ${expiryDateStr}.`, 
-              "success"
-            );
-            addLog(`✅ Thanh toán thành công! Gói ${updatedUser.planType || newPlanType} đã được kích hoạt. Hạn dùng: ${expiryDateStr}`, "info");
-            setSelectedPlan(null);
-            stopPaymentPolling();
-            return true;
+          const userIndex = dbUsers.findIndex((u: any) => 
+            u.uid === currentUser.uid || u.loginId?.toLowerCase() === loginId.toLowerCase()
+          );
+          
+          if (userIndex >= 0) {
+            // User đã tồn tại, cập nhật
+            dbUsers[userIndex] = updatedUser;
           } else {
-            addLog(`⚠️ Không tìm thấy user trong DB sau khi cập nhật.`, "warning");
+            // User chưa có trong DB, thêm mới
+            dbUsers.push(updatedUser);
           }
+          
+          setAllUsers(dbUsers);
+          // Sync lại lên DB
+          await syncToDb('users', dbUsers);
         } else {
-          addLog(`⚠️ Không thể tải danh sách users từ DB.`, "warning");
+          // Nếu không load được từ DB, vẫn cập nhật local state
+          const existingIndex = allUsers.findIndex((u: any) => u.uid === currentUser.uid);
+          if (existingIndex >= 0) {
+            const updatedAllUsers = [...allUsers];
+            updatedAllUsers[existingIndex] = updatedUser;
+            setAllUsers(updatedAllUsers);
+          } else {
+            setAllUsers([...allUsers, updatedUser]);
+          }
         }
+        
+        const expiryDateStr = new Date(newExpiry).toLocaleDateString('vi-VN', {
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+        
+        showNotification(
+          "🎉 Thanh toán thành công!", 
+          `Gói ${newPlanType} đã được kích hoạt. Hạn dùng đến ${expiryDateStr}.`, 
+          "success"
+        );
+        addLog(`✅ Thanh toán thành công! Gói ${newPlanType} đã được kích hoạt. Hạn dùng: ${expiryDateStr}`, "info");
+        setSelectedPlan(null);
+        stopPaymentPolling();
+        return true;
       } else {
         // Cập nhật lastChecked ngay cả khi chưa có thay đổi (để tránh false positive)
         if (newExpiry > 0) setLastCheckedExpiry(newExpiry);
