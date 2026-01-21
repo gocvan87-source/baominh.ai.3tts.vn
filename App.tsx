@@ -137,6 +137,8 @@ const App: React.FC = () => {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
   const [selectedPlan, setSelectedPlan] = useState<{ label: string; plan: string; price: number; months: number } | null>(null);
+  const [isCheckingPayment, setIsCheckingPayment] = useState(false);
+  const [paymentCheckInterval, setPaymentCheckInterval] = useState<NodeJS.Timeout | null>(null);
   const [isAIPromptOpen, setIsAIPromptOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   
@@ -734,7 +736,91 @@ const App: React.FC = () => {
   const handleSelectPlan = (plan: { label: string; plan: string; price: number; months: number }) => {
     setSelectedPlan(plan);
     addLog(`Đã chọn gói ${plan.label} - ${plan.price.toLocaleString()}đ. Vui lòng quét QR để thanh toán.`, "info");
+    // Bắt đầu polling kiểm tra thanh toán mỗi 5 giây
+    startPaymentPolling();
   };
+
+  const startPaymentPolling = () => {
+    // Dừng polling cũ nếu có
+    if (paymentCheckInterval) {
+      clearInterval(paymentCheckInterval);
+    }
+
+    setIsCheckingPayment(true);
+    const interval = setInterval(async () => {
+      if (!currentUser) {
+        clearInterval(interval);
+        setIsCheckingPayment(false);
+        return;
+      }
+
+      try {
+        const loginId = currentUser.loginId || currentUser.uid;
+        const res = await fetch(`/api/check_payment/${loginId}`);
+        const data = await res.json();
+        
+        if (data.found && data.user) {
+          // So sánh expiryDate để phát hiện thay đổi
+          const oldExpiry = currentUser.expiryDate || 0;
+          const newExpiry = data.user.expiryDate || 0;
+          
+          if (newExpiry > oldExpiry || data.user.planType !== currentUser.planType) {
+            // Thanh toán thành công! Cập nhật user
+            clearInterval(interval);
+            setIsCheckingPayment(false);
+            setPaymentCheckInterval(null);
+            
+            // Reload user data từ DB
+            const dbUsers = await loadFromDb('users');
+            if (dbUsers && Array.isArray(dbUsers)) {
+              const updatedUser = dbUsers.find((u: any) => u.uid === currentUser.uid);
+              if (updatedUser) {
+                setCurrentUser(updatedUser);
+                setAllUsers(dbUsers);
+                localStorage.setItem('bm_user_session', JSON.stringify(updatedUser));
+                
+                showNotification(
+                  "🎉 Thanh toán thành công!", 
+                  `Gói ${data.user.planType} đã được kích hoạt. Hạn dùng đến ${new Date(newExpiry).toLocaleDateString('vi-VN')}.`, 
+                  "success"
+                );
+                addLog(`Thanh toán thành công! Gói ${data.user.planType} đã được kích hoạt.`, "info");
+                setSelectedPlan(null);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Lỗi kiểm tra thanh toán:", err);
+      }
+    }, 5000); // Kiểm tra mỗi 5 giây
+
+    setPaymentCheckInterval(interval);
+    
+    // Tự động dừng sau 10 phút (120 lần * 5s)
+    setTimeout(() => {
+      clearInterval(interval);
+      setIsCheckingPayment(false);
+      setPaymentCheckInterval(null);
+    }, 600000);
+  };
+
+  const stopPaymentPolling = () => {
+    if (paymentCheckInterval) {
+      clearInterval(paymentCheckInterval);
+      setPaymentCheckInterval(null);
+    }
+    setIsCheckingPayment(false);
+  };
+
+  // Cleanup polling khi đóng modal hoặc unmount
+  useEffect(() => {
+    return () => {
+      if (paymentCheckInterval) {
+        clearInterval(paymentCheckInterval);
+      }
+    };
+  }, [paymentCheckInterval]);
 
   const handleGenerateAdContent = async () => {
     if (!adDescription.trim()) return;
@@ -1394,7 +1480,7 @@ const App: React.FC = () => {
       {isPricingModalOpen && currentUser && (
         <div className="fixed inset-0 z-[180] flex items-center justify-center p-6 bg-slate-900/80 backdrop-blur-md animate-in fade-in">
           <div className="bg-white w-full max-w-2xl rounded-[3rem] p-10 shadow-2xl relative">
-            <button onClick={() => { setIsPricingModalOpen(false); setSelectedPlan(null); }} className="absolute top-6 right-6 text-slate-300 hover:text-red-500">
+            <button onClick={() => { setIsPricingModalOpen(false); setSelectedPlan(null); stopPaymentPolling(); }} className="absolute top-6 right-6 text-slate-300 hover:text-red-500">
               <X className="w-7 h-7" />
             </button>
             
@@ -1451,12 +1537,20 @@ const App: React.FC = () => {
                 <p className="text-[11px] text-slate-500 mb-2">
                   Quét QR code bằng app ngân hàng để thanh toán
                 </p>
-                <p className="text-[10px] font-mono text-slate-400 mb-4">
+                <p className="text-[10px] font-mono text-slate-400 mb-2">
                   Mã thanh toán: <span className="font-bold text-indigo-600">VT-{currentUser.loginId || currentUser.uid}</span>
                 </p>
+                {isCheckingPayment && (
+                  <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-xl">
+                    <p className="text-[11px] font-bold text-blue-600 flex items-center justify-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Đang kiểm tra thanh toán tự động...
+                    </p>
+                  </div>
+                )}
                 <div className="flex gap-3 justify-center">
                   <button
-                    onClick={() => setSelectedPlan(null)}
+                    onClick={() => { setSelectedPlan(null); stopPaymentPolling(); }}
                     className="px-6 py-2.5 bg-slate-100 text-slate-600 rounded-xl text-[11px] font-black uppercase hover:bg-slate-200"
                   >
                     Chọn gói khác

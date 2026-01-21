@@ -119,6 +119,162 @@ app.post('/api/data/:id', async (req, res) => {
   }
 });
 
+// Map số tiền => gói cước
+const PLAN_CONFIG = {
+  150000: { planType: "MONTHLY", months: 1 },
+  450000: { planType: "3MONTHS", months: 3 },
+  900000: { planType: "6MONTHS", months: 6 },
+  1800000: { planType: "YEARLY", months: 12 },
+};
+
+const DAILY_CHARS = 50000; // 50.000 ký tự / ngày cho mọi gói
+const SEPAY_WEBHOOK_API_KEY = process.env.SEPAY_WEBHOOK_API_KEY || "";
+
+// Helper: cộng thêm monthCount vào 1 timestamp (ms)
+function addMonths(from, monthCount) {
+  const d = new Date(from);
+  d.setMonth(d.getMonth() + monthCount);
+  return d.getTime();
+}
+
+// Webhook nhận từ SePay
+app.post('/api/sepay_webhook', async (req, res) => {
+  try {
+    // 1. Xác thực API key
+    const auth = req.headers["authorization"] || "";
+    const token = auth.replace(/^sepay\s+/i, "").replace(/^apikey\s+/i, "").trim();
+    if (!SEPAY_WEBHOOK_API_KEY || token !== SEPAY_WEBHOOK_API_KEY) {
+      console.log("❌ Webhook: Invalid API key");
+      return res.status(401).json({ error: "Invalid webhook api key" });
+    }
+
+    const payload = req.body;
+    console.log("📥 Webhook SePay nhận được:", JSON.stringify(payload, null, 2));
+
+    // 2. Đọc thông tin giao dịch từ payload
+    const amount = parseInt(payload.amount || payload.money || 0);
+    const description = (payload.description || payload.content || payload.note || "").toString();
+    const status = (payload.status || "").toLowerCase();
+    const transId = String(payload.transId || payload.id || payload.transaction_id || "");
+
+    // Chỉ xử lý giao dịch thành công
+    if (!["success", "thanh_cong", "completed", "thanh toán thành công"].includes(status)) {
+      console.log(`ℹ️ Webhook: Ignore transaction với status "${status}"`);
+      return res.status(200).json({ ok: true, message: "Ignore non-success transaction" });
+    }
+
+    // 3. Map số tiền -> gói
+    const plan = PLAN_CONFIG[amount];
+    if (!plan) {
+      console.log(`ℹ️ Webhook: Unknown amount ${amount}, ignore`);
+      return res.status(200).json({ ok: true, message: "Unknown amount, ignore" });
+    }
+
+    // 4. Tìm loginId trong nội dung: dạng VT-loginId
+    const match = description.match(/VT-([a-zA-Z0-9_.-]+)/i);
+    if (!match) {
+      console.log(`ℹ️ Webhook: No payment code (VT-xxx) found in "${description}"`);
+      return res.status(200).json({ ok: true, message: "No payment code (VT-xxx) found" });
+    }
+    const loginId = match[1].toLowerCase();
+
+    // 5. Tải danh sách users từ DB
+    const usersRes = await pool.query('SELECT data FROM bm_settings WHERE id = $1', ['users']);
+    if (usersRes.rows.length === 0) {
+      return res.status(200).json({ ok: true, message: "Users table not found" });
+    }
+
+    const allUsers = usersRes.rows[0].data || [];
+    const user = allUsers.find(u => u.loginId?.toLowerCase() === loginId);
+
+    if (!user) {
+      console.log(`ℹ️ Webhook: User not found for loginId "${loginId}"`);
+      return res.status(200).json({ ok: true, message: "User not found for this loginId" });
+    }
+
+    // 6. Kiểm tra tránh xử lý trùng lặp (dùng transId hoặc timestamp)
+    const paymentLogKey = `payment_${transId || Date.now()}`;
+    const existingLog = await pool.query('SELECT data FROM bm_settings WHERE id = $1', ['payment_logs']);
+    const paymentLogs = existingLog.rows[0]?.data || [];
+    
+    if (paymentLogs.some(log => log.transId === transId && log.loginId === loginId)) {
+      console.log(`ℹ️ Webhook: Transaction ${transId} already processed`);
+      return res.status(200).json({ ok: true, message: "Transaction already processed" });
+    }
+
+    // 7. Tính hạn dùng mới
+    const now = Date.now();
+    const currentExpiry = user.expiryDate || now;
+    const base = currentExpiry > now ? currentExpiry : now;
+    const newExpiry = addMonths(base, plan.months);
+
+    // 8. Cập nhật user
+    const updatedUser = {
+      ...user,
+      planType: plan.planType,
+      expiryDate: newExpiry,
+      characterLimit: DAILY_CHARS,
+      credits: DAILY_CHARS,
+      isBlocked: false,
+      expiryNotifyLevel: 0
+    };
+
+    const updatedUsers = allUsers.map(u => u.uid === user.uid ? updatedUser : u);
+
+    // 9. Lưu lại users và payment log
+    await pool.query(
+      'INSERT INTO bm_settings (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = $2',
+      ['users', JSON.stringify(updatedUsers)]
+    );
+
+    paymentLogs.push({
+      transId,
+      loginId,
+      amount,
+      description,
+      planType: plan.planType,
+      months: plan.months,
+      processedAt: new Date().toISOString()
+    });
+
+    await pool.query(
+      'INSERT INTO bm_settings (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = $2',
+      ['payment_logs', JSON.stringify(paymentLogs)]
+    );
+
+    console.log(`✅ Webhook: Đã cập nhật gói ${plan.planType} cho user ${loginId}, hạn dùng đến ${new Date(newExpiry).toLocaleString('vi-VN')}`);
+    
+    return res.status(200).json({ 
+      ok: true, 
+      message: `Payment processed for ${loginId}`,
+      user: { uid: updatedUser.uid, planType: updatedUser.planType, expiryDate: updatedUser.expiryDate }
+    });
+  } catch (err) {
+    console.error("❌ Webhook error:", err);
+    return res.status(500).json({ error: "Internal error: " + err.message });
+  }
+});
+
+// API: Kiểm tra thanh toán (để frontend polling)
+app.get('/api/check_payment/:loginId', async (req, res) => {
+  try {
+    const { loginId } = req.params;
+    const usersRes = await pool.query('SELECT data FROM bm_settings WHERE id = $1', ['users']);
+    if (usersRes.rows.length === 0) {
+      return res.json({ found: false });
+    }
+    const allUsers = usersRes.rows[0].data || [];
+    const user = allUsers.find(u => u.loginId?.toLowerCase() === loginId.toLowerCase());
+    if (!user) {
+      return res.json({ found: false });
+    }
+    return res.json({ found: true, user });
+  } catch (err) {
+    console.error("❌ Check payment error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // Phục vụ ứng dụng Frontend cho các route không phải API
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
