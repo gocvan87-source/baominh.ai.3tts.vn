@@ -28,7 +28,7 @@ export interface ManagedKey {
   errorMessage?: string;
   usageCount: number;
   isTrialKey: boolean; 
-  allowedUserIds: string[]; 
+  allowedUserIds: string[]; // Danh sách UID được phép dùng Key này. Trống = Dùng chung.
 }
 
 export interface UserProfile {
@@ -37,18 +37,33 @@ export interface UserProfile {
   email: string;
   photoURL: string;
   role: UserRole;
-  credits: number; 
+  credits: number; // Ký tự còn lại trong ngày
   lastActive: string;
   isBlocked: boolean;
   planType: PlanType;
   expiryDate: number; 
-  characterLimit: number; 
-  bonusDailyLimit?: number; 
-  lastResetDate?: string; 
-  loginId?: string; 
-  password?: string; 
-  dailyKeyCount?: number; 
-  lastKeyDate?: string; 
+  characterLimit: number; // Giới hạn cơ bản theo gói
+  bonusDailyLimit?: number; // Giới hạn cộng thêm vĩnh viễn do đóng góp Key
+  lastResetDate?: string; // Ngày reset credits gần nhất
+  loginId?: string; // Tên đăng nhập do admin cấp
+  password?: string; // Mật khẩu do admin cấp
+  dailyKeyCount?: number; // Số key đã đóng góp trong ngày
+  lastKeyDate?: string; // Ngày đóng góp key gần nhất
+  expiryNotifyLevel?: number; // Mức độ thông báo hết hạn: 0 (chưa), 1 (3 ngày), 2 (2 ngày), 3 (1 ngày)
+}
+
+// Added AdCampaign interface to fix module export error
+export interface AdCampaign {
+  id: string;
+  isActive: boolean;
+  title: string;
+  content: string;
+  buttonText: string;
+  buttonLink: string;
+  createdAt: number;
+  startDate?: string; // YYYY-MM-DD
+  endDate?: string;   // YYYY-MM-DD
+  imageUrl?: string;
 }
 
 export type VoiceEmotion = 'NEUTRAL' | 'HAPPY' | 'SAD' | 'ANGRY' | 'SERIOUS' | 'EMOTIONAL' | 'WHISPER';
@@ -61,7 +76,7 @@ export interface ClonedVoice {
   description: string;
   toneSummary: string;
   createdAt: number;
-  audioBase64?: string;
+  audioBase64?: string; // Sample audio for preview/reference
   mimeType?: string;
 }
 
@@ -103,27 +118,10 @@ export interface GenerationState {
   audioBuffer: ArrayBuffer | null;
 }
 
-export interface AdCampaign {
-  id: string;
-  isActive: boolean;
-  title: string;
-  content: string;
-  imageUrl?: string;
-  buttonText: string;
-  buttonLink: string;
-  startDate?: string; // Định dạng YYYY-MM-DD
-  endDate?: string;   // Định dạng YYYY-MM-DD
-  createdAt: number;
-}
-
-export interface SystemConfig {
-  enableKeyReward: boolean;
-  keyRewardAmount: number;
-  maxKeysPerDay: number;
-}
-
 declare global {
   interface Window {
     lamejs?: any;
+    pdfjsLib?: any;
+    mammoth?: any;
   }
 }

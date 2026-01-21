@@ -8,6 +8,9 @@ export default defineConfig(({ mode }) => {
   return {
     base: './', // Đảm bảo hoạt động trên mọi môi trường static (Render/Github Pages)
     plugins: [react()],
+    define: {
+       'process.env.API_KEY': JSON.stringify(env.API_KEY)
+    },
     build: {
       outDir: 'dist',
       assetsDir: 'assets',

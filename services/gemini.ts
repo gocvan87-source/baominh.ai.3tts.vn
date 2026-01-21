@@ -5,28 +5,6 @@ import { VIETNAMESE_ABBREVIATIONS } from "../constants";
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
- * Exponential backoff với jitter để tránh thundering herd
- */
-const exponentialBackoff = async (retryCount: number, baseDelay: number = 1000): Promise<void> => {
-  const exponentialDelay = baseDelay * Math.pow(2, retryCount);
-  const jitter = Math.random() * 1000; // Random 0-1000ms để tránh synchronized retries
-  const totalDelay = Math.min(exponentialDelay + jitter, 30000); // Max 30 seconds
-  await delay(totalDelay);
-};
-
-/**
- * Wrapper với timeout cho API calls
- */
-const withTimeout = <T>(promise: Promise<T>, timeoutMs: number = 30000): Promise<T> => {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => 
-      setTimeout(() => reject(new Error('Request timeout after ' + timeoutMs + 'ms')), timeoutMs)
-    )
-  ]);
-};
-
-/**
  * Kiểm tra API Key có thực sự hoạt động hay không bằng một request tối giản
  */
 export const testApiKey = async (apiKey: string): Promise<{ valid: boolean, message: string }> => {
@@ -47,162 +25,224 @@ export const testApiKey = async (apiKey: string): Promise<{ valid: boolean, mess
 };
 
 /**
- * Xử lý lỗi Gemini API chi tiết với Retry-After support
+ * Xử lý lỗi Gemini API chi tiết
+ * Hỗ trợ đầy đủ: rate limit (429), quota exhausted, overload (503), và các lỗi khác
  */
-export const handleAiError = (error: any): { 
-  message: string, 
-  isRateLimit: boolean, 
-  shouldWait: boolean,
-  retryAfter?: number 
-} => {
+export const handleAiError = (error: any): { message: string, isRateLimit: boolean, shouldWait: boolean, isOverload: boolean } => {
   const rawMessage = error?.message ? String(error.message) : String(error);
   const lowerMessage = rawMessage.toLowerCase();
   
+  // Kiểm tra rate limit và quota exhausted
   const isRateLimit = lowerMessage.includes("429") || 
-                     lowerMessage.includes("resource exhausted") || 
-                     lowerMessage.includes("quota") ||
-                     lowerMessage.includes("rate limit");
+                      lowerMessage.includes("resource exhausted") || 
+                      lowerMessage.includes("quota") ||
+                      lowerMessage.includes("quota exhausted") ||
+                      lowerMessage.includes("rate limit") ||
+                      lowerMessage.includes("too many requests");
+  
+  // Kiểm tra overload và server errors
+  const isOverload = lowerMessage.includes("503") ||
+                     lowerMessage.includes("service unavailable") ||
+                     lowerMessage.includes("overload") ||
+                     lowerMessage.includes("over capacity") ||
+                     lowerMessage.includes("model is overloaded") ||
+                     lowerMessage.includes("server overload") ||
+                     lowerMessage.includes("engine over capacity");
+  
+  // Kiểm tra invalid key
   const isInvalidKey = lowerMessage.includes("400") || 
-                      lowerMessage.includes("401") || 
-                      lowerMessage.includes("403") || 
-                      lowerMessage.includes("api key") || 
-                      lowerMessage.includes("invalid argument") || 
-                      lowerMessage.includes("not found");
-  const isSafetyBlock = lowerMessage.includes("safety") || lowerMessage.includes("blocked");
-  const isTimeout = lowerMessage.includes("timeout");
+                       lowerMessage.includes("401") || 
+                       lowerMessage.includes("403") || 
+                       lowerMessage.includes("api key") || 
+                       lowerMessage.includes("invalid argument") || 
+                       lowerMessage.includes("not found") ||
+                       lowerMessage.includes("unauthenticated");
+  
+  // Kiểm tra safety block
+  const isSafetyBlock = lowerMessage.includes("safety") || 
+                        lowerMessage.includes("blocked");
 
-  // Parse Retry-After từ response headers nếu có
-  let retryAfter: number | undefined;
-  if (error?.response?.headers?.['retry-after']) {
-    retryAfter = parseInt(error.response.headers['retry-after'], 10) * 1000; // Convert to ms
-  } else if (isRateLimit) {
-    retryAfter = 60000; // Default 60 seconds cho rate limit
-  }
-
+  // Rate limit và quota exhausted - cần retry với delay
   if (isRateLimit) {
     return { 
-      message: "❌ Hết hạn mức (429). Vui lòng thử lại sau.", 
+      message: "❌ Hết hạn mức (429/Quota exhausted).", 
       isRateLimit: true, 
       shouldWait: true,
-      retryAfter: retryAfter || 60000
+      isOverload: false
     };
   }
+  
+  // Overload - cần retry với delay lớn hơn
+  if (isOverload) {
+    return { 
+      message: "⚠️ Server quá tải (503/Overload).", 
+      isRateLimit: true, // Xử lý như rate limit để có retry
+      shouldWait: true,
+      isOverload: true
+    };
+  }
+  
+  // Invalid key - không retry
   if (isInvalidKey) {
     return { 
       message: "🚫 Key không hợp lệ hoặc đã bị vô hiệu hóa.", 
       isRateLimit: false, 
-      shouldWait: false 
+      shouldWait: false,
+      isOverload: false
     };
   }
+  
+  // Safety block - không retry
   if (isSafetyBlock) {
     return { 
       message: "🛡️ Nội dung bị chặn do chính sách an toàn.", 
       isRateLimit: false, 
-      shouldWait: false 
-    };
-  }
-  if (isTimeout) {
-    return { 
-      message: "⏱️ Request timeout. Vui lòng thử lại.", 
-      isRateLimit: false, 
-      shouldWait: true,
-      retryAfter: 5000
+      shouldWait: false,
+      isOverload: false
     };
   }
   
+  // Lỗi khác
   return { 
     message: `❗ Lỗi: ${rawMessage.substring(0, 100)}`, 
     isRateLimit: false, 
-    shouldWait: false 
+    shouldWait: false,
+    isOverload: false
   };
 };
 
 /**
- * NGUYÊN TẮC VÀNG: Chuẩn hóa văn bản để đọc chính xác 100%
- * Quy tắc này xử lý triệt để lỗi đọc sai chính tả, ký hiệu và định dạng đặc biệt.
- * 
- * Các tính năng:
- * 1. Chuẩn hóa Unicode (NFC): Khắc phục lỗi hiển thị dấu tiếng Việt
- * 2. Sửa lỗi dấu câu: Tự động thêm khoảng trắng sau dấu câu
- * 3. Đọc đúng Ngày/Tháng: Tự động chuyển 10/10/2023 thành ngày 10 tháng 10 năm 2023
- * 4. Đọc đúng Đơn vị đo lường: Tự động chuyển 5kg, 100km, 500đ thành đọc đúng
- * 5. Mở rộng từ viết tắt: Tự động thay thế các từ viết tắt phổ biến
- * 6. Xử lý ký tự đặc biệt: Chuyển gạch đầu dòng thành dấu phẩy
+ * BỘ 1: CHUẨN HÓA CƠ BẢN BẰNG QUY TẮC
+ * - Xử lý ký hiệu, đơn vị, ngày tháng, từ viết tắt phổ biến
+ * - Không thay đổi nội dung, chỉ làm cho dễ đọc to hơn
  */
 export const normalizeTextForSpeech = (text: string): string => {
   if (!text) return "";
 
   // 1. Chuẩn hóa Unicode (NFC) để xử lý lỗi font và dấu tiếng Việt
-  // Ví dụ: òa vs oà -> chuẩn hóa về một dạng
   let processed = text.normalize("NFC");
   processed = processed.replace(/[\u200B-\u200D\uFEFF]/g, " ");
 
-  // 2. Xử lý ngày tháng chuyên sâu (PHẢI XỬ LÝ TRƯỚC các ký hiệu toán học)
+  // 2. Xử lý ký hiệu toán học và so sánh (Tránh đọc sai ký hiệu)
+  processed = processed.replace(/(\d+)\s*%\b/g, "$1 phần trăm");
+  processed = processed.replace(/\b\+\b/g, " cộng ");
+  processed = processed.replace(/\s=\s/g, " bằng ");
+  processed = processed.replace(/\s>\s/g, " lớn hơn ");
+  processed = processed.replace(/\s<\s/g, " nhỏ hơn ");
+  processed = processed.replace(/\b(\d+)\s*\*\s*(\d+)\b/g, "$1 nhân $2");
+  
+  // 3. Xử lý ngày tháng chuyên sâu
   // dd/mm/yyyy -> ngày dd tháng mm năm yyyy
   processed = processed.replace(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g, "ngày $1 tháng $2 năm $3");
   // dd/mm -> ngày dd tháng mm
-  processed = processed.replace(/\b(\d{1,2})\/(\d{1,2})\b(?![\/\d])/g, "ngày $1 tháng $2");
-
-  // 3. Xử lý ký hiệu toán học và so sánh (Tránh đọc sai ký hiệu)
-  // FIX: Sử dụng lookahead thay vì \b vì % không phải word character
-  processed = processed.replace(/(\d+)\s*%(?=\s|$|[^\w%])/g, "$1 phần trăm");
-  
-  // FIX: Sử dụng pattern đơn giản hơn, không dùng lookbehind để tương thích tốt hơn
-  // Xử lý dấu + khi có số ở cả hai bên hoặc có khoảng trắng
-  processed = processed.replace(/(\d+)\s*\+\s*(\d+)/g, "$1 cộng $2");
-  processed = processed.replace(/\s\+\s/g, " cộng ");
-  processed = processed.replace(/\s*=\s*/g, " bằng ");
-  // FIX: Sửa regex > và < để không match với đơn vị đo lường (ví dụ: 5l không bị match)
-  processed = processed.replace(/(\d+)\s*>\s*(\d+)/g, "$1 lớn hơn $2");
-  processed = processed.replace(/\s*>\s*/g, " lớn hơn ");
-  processed = processed.replace(/(\d+)\s*<\s*(\d+)/g, "$1 nhỏ hơn $2");
-  processed = processed.replace(/\s*<\s*/g, " nhỏ hơn ");
-  processed = processed.replace(/(\d+)\s*\*\s*(\d+)/g, "$1 nhân $2");
-  // Chỉ xử lý phép chia khi không phải ngày tháng (đã xử lý ở trên)
-  processed = processed.replace(/(\d+)\s*\/\s*(\d+)(?!\/)/g, "$1 chia $2");
+  processed = processed.replace(/\b(\d{1,2})\/(\d{1,2})\b/g, "ngày $1 tháng $2");
 
   // 4. Xử lý đơn vị tiền tệ và đo lường (Chỉ khi đứng sau số)
-  // FIX: Sử dụng \d+ thay vì \d để match nhiều chữ số (5kg, 100km, 500đ)
   const units: Record<string, string> = {
     "kg": "ki lô gam", "km": "ki lô mét", "cm": "xăng ti mét", "mm": "mi li mét",
     "m2": "mét vuông", "m3": "mét khối", "ml": "mi li lít", "l": "lít", "g": "gam",
     "đ": "đồng", "vnd": "việt nam đồng", "usd": "đô la mỹ", "tr": "triệu", "tỷ": "tỷ"
   };
   
-  // Sắp xếp units theo độ dài giảm dần để match đơn vị dài trước (ví dụ: "m2" trước "m")
-  const sortedUnits = Object.entries(units).sort((a, b) => b[0].length - a[0].length);
-  for (const [unit, reading] of sortedUnits) {
-    // Escape các ký tự đặc biệt trong unit
-    const escapedUnit = unit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // FIX: Sử dụng \d+ và lookahead chặt chẽ hơn để đảm bảo unit không nằm trong từ khác
-    // Chỉ match khi unit là một từ độc lập (có khoảng trắng hoặc ký tự không phải chữ sau unit)
-    // Và đảm bảo không match khi unit là phần của từ khác (ví dụ: "l" trong "lớn")
-    const regex = new RegExp(`(\\d+)\\s*${escapedUnit}(?=\\s|$|[^\\w\\u00C0-\\u1EF9])`, 'gi');
-    processed = processed.replace(regex, `$1 ${reading}`);
+  for (const [unit, reading] of Object.entries(units)) {
+      const regex = new RegExp(`(\\d)\\s*${unit}\\b`, 'gi');
+      processed = processed.replace(regex, `$1 ${reading}`);
   }
+
+  // 4.1. Xử lý riêng một số cụm viết tắt hành chính hay gặp nhưng có khoảng trắng bên trong
+  // Ví dụ: "UB MTTQ Việt Nam" -> "UBMTTQ Việt Nam" để từ điển mở rộng đúng
+  processed = processed.replace(/\bUB\s+MTTQ\b/gi, "UBMTTQ");
+
+  // 4.2. Sửa các lỗi chính tả phổ biến trong văn bản hành chính
+  // "uỷ" -> "ủy" (dấu hỏi thay vì dấu ngã)
+  processed = processed.replace(/\buỷ\b/gi, "ủy");
+  processed = processed.replace(/\bĐảng\s+uỷ\b/gi, "Đảng ủy");
+  processed = processed.replace(/\bđảng\s+uỷ\b/gi, "đảng ủy");
+  // "Hội đồng nhân và" -> "Hội đồng nhân dân" (sửa lỗi thiếu chữ)
+  processed = processed.replace(/\bhội đồng nhân và\b/gi, "Hội đồng nhân dân");
+  processed = processed.replace(/\bHội đồng nhân và\b/g, "Hội đồng nhân dân");
 
   // 5. Mở rộng từ viết tắt (Theo danh sách chuẩn từ constants)
   const sortedAbbrs = Object.keys(VIETNAMESE_ABBREVIATIONS).sort((a, b) => b.length - a.length);
   for (const abbr of sortedAbbrs) {
       const fullText = VIETNAMESE_ABBREVIATIONS[abbr];
       const escapedAbbr = abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      // Nếu có dấu chấm ở cuối (TP.), match nguyên văn, nếu không dùng word boundary
-      const regex = abbr.endsWith('.') ? new RegExp(escapedAbbr, 'gi') : new RegExp(`\\b${escapedAbbr}\\b`, 'g');
+      // Nếu có dấu chấm ở cuối (TP.), match nguyên văn, nếu không dùng word boundary.
+      // Dùng 'gi' để không phân biệt hoa/thường, giúp đọc đúng trong mọi kiểu văn bản.
+      const regex = abbr.endsWith('.') ? new RegExp(escapedAbbr, 'gi') : new RegExp(`\\b${escapedAbbr}\\b`, 'gi');
       processed = processed.replace(regex, fullText + " ");
   }
 
   // 6. Chuẩn hóa dấu câu để AI ngắt nghỉ đúng (Dấu câu dính liền)
-  // Tự động thêm khoảng trắng sau dấu câu nếu thiếu
   processed = processed.replace(/([,.!:;?])(?=[^\s\d])/g, '$1 '); // "chào,bạn" -> "chào, bạn"
-  // Xóa khoảng trắng thừa trước dấu câu
   processed = processed.replace(/\s+([,.!:;?])/g, '$1'); // "chào , bạn" -> "chào, bạn"
   
   // 7. Xử lý gạch đầu dòng và phân đoạn (Tránh đọc là "trừ")
-  // Chuyển gạch đầu dòng thành dấu phẩy để ngắt nhịp thở tự nhiên hơn
   processed = processed.replace(/(^|\n)\s*-\s+/g, "$1, "); 
 
   // 8. Dọn dẹp khoảng trắng thừa
   return processed.replace(/\s+/g, ' ').trim();
+};
+
+/**
+ * BỘ 2: HIỆU ĐÍNH THÔNG MINH BẰNG AI
+ * Dùng Gemini để:
+ *  - Mở rộng các từ viết tắt hiếm gặp
+ *  - Sửa lỗi chính tả, dấu câu
+ *  - Giữ nguyên nội dung, không tóm tắt, không thêm ý mới
+ * Phù hợp cho văn bản hành chính, văn bản dài và phong phú.
+ */
+export const refineTextForReading = async (rawText: string, apiKey: string = "", onLog?: (m: string, t: 'info' | 'error') => void): Promise<string> => {
+  const text = rawText || "";
+  if (!text.trim()) return "";
+
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const prompt = `
+Bạn là chuyên gia ngôn ngữ tiếng Việt chuyên nghiệp, đọc bản tin thời sự trên truyền hình VTV.
+
+NHIỆM VỤ QUAN TRỌNG:
+1. SỬA LỖI CHÍNH TẢ: Đảm bảo mọi từ đều đúng chính tả tiếng Việt chuẩn. Ví dụ:
+   - "uỷ" -> "ủy" (dấu hỏi, không phải dấu ngã)
+   - "Hội đồng nhân và" -> "Hội đồng nhân dân" (sửa lỗi thiếu chữ)
+   - Kiểm tra và sửa mọi lỗi chính tả khác trong văn bản
+
+2. MỞ RỘNG TỪ VIẾT TẮT: Mở rộng TẤT CẢ các từ viết tắt, kể cả:
+   - HĐND -> Hội đồng nhân dân
+   - UBND -> Ủy ban nhân dân
+   - UBMTTQ, UB MTTQ -> Ủy ban Mặt trận Tổ quốc
+   - BCH -> Ban chấp hành
+   - Và mọi từ viết tắt khác
+
+3. CHUẨN HÓA DẤU CÂU: Thêm dấu chấm, phẩy đúng chỗ để dễ đọc, ngắt nghỉ tự nhiên.
+
+4. GIỮ NGUYÊN NỘI DUNG: 
+   - KHÔNG được tóm tắt
+   - KHÔNG được lược bỏ ý
+   - KHÔNG thêm bình luận hay ý kiến cá nhân
+   - Giữ nguyên tên người, tên địa danh, số liệu
+
+5. PHONG CÁCH: Viết lại theo phong cách đọc bản tin thời sự: rõ ràng, mạch lạc, văn phong hành chính/trang trọng, GIỌNG ĐỀU, không lên xuống cảm xúc quá mức.
+
+Văn bản gốc cần hiệu đính:
+"""${text}"""
+
+Hãy trả về CHỈ văn bản đã được sửa chính tả, mở rộng viết tắt, và chuẩn hóa dấu câu. KHÔNG kèm giải thích hay bình luận.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt
+    });
+
+    const refined = (response as any)?.text || text;
+    if (onLog) onLog("AI đã hiệu đính văn bản để đọc to chính xác hơn.", "info");
+    return refined.trim();
+  } catch (error: any) {
+    const info = handleAiError(error);
+    if (onLog) onLog(`Không thể hiệu đính bằng AI, dùng nguyên văn bản gốc. (${info.message})`, "warning" as any);
+    // Nếu AI lỗi, fallback: chỉ dùng normalizeTextForSpeech thông thường
+    return text;
+  }
 };
 
 export const generateContentFromDescription = async (prompt: string, modePrompt: string, onLog?: any, apiKey: string = "") => {
@@ -216,52 +256,74 @@ export const generateContentFromDescription = async (prompt: string, modePrompt:
   } catch (error: any) { throw new Error(handleAiError(error).message); }
 };
 
-export const generateAudioSegment = async (
-  text: string, 
-  config: any, 
-  onLog?: any, 
-  apiKey: string = "",
-  retryCount: number = 0,
-  maxRetries: number = 3
-): Promise<ArrayBuffer> => {
+export const generateAudioSegment = async (text: string, config: any, onLog?: any, apiKey: string = ""): Promise<ArrayBuffer> => {
   try {
     const ai = new GoogleGenAI({ apiKey });
-    const response = await withTimeout(
-      ai.models.generateContent({
-        model: "gemini-2.5-flash-preview-tts",
-        contents: [{ parts: [{ text }] }],
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: config.voiceName } } },
+    // Đảm bảo voiceName luôn được truyền đúng và nhất quán
+    const voiceName = config?.voiceName || 'Kore'; // Fallback nếu không có
+    
+    // Log để debug nếu cần
+    if (onLog && text.length > 100) {
+      onLog(`Tạo audio với giọng: ${voiceName}, độ dài: ${text.length} ký tự`, "info");
+    }
+    
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-preview-tts",
+      contents: [{ parts: [{ text }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: { 
+          voiceConfig: { 
+            prebuiltVoiceConfig: { 
+              voiceName: voiceName // Đảm bảo dùng cùng voiceName cho mọi đoạn
+            } 
+          } 
         },
-      }),
-      30000 // 30 seconds timeout
-    );
-    const base64 = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
+      },
+    });
+    const base64 = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData)?.inlineData?.data;
     if (!base64) throw new Error("TTS Failure");
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return bytes.buffer;
-  } catch (error: any) {
-    const errorInfo = handleAiError(error);
-    
-    // Retry logic với exponential backoff
-    if (retryCount < maxRetries && (errorInfo.isRateLimit || errorInfo.shouldWait)) {
-      const waitTime = errorInfo.retryAfter || (1000 * Math.pow(2, retryCount));
-      if (onLog) onLog(`Segment error, retrying (${retryCount + 1}/${maxRetries}) after ${Math.round(waitTime/1000)}s...`, 'warning');
-      await delay(waitTime);
-      return generateAudioSegment(text, config, onLog, apiKey, retryCount + 1, maxRetries);
-    }
-    
-    throw new Error(errorInfo.message);
-  }
+  } catch (error: any) { throw new Error(handleAiError(error).message); }
 };
 
 export const generateAudioParallel = async (text: string, config: any, onProgress: any, onLog?: any, apiKey: string = ""): Promise<ArrayBuffer> => {
-  // BƯỚC QUAN TRỌNG: Chuẩn hóa văn bản trước khi chia nhỏ
-  const normalizedText = normalizeTextForSpeech(text);
+  const raw = text || "";
+
+  // NGUYÊN TẮC TIẾT KIỆM QUOTA VÀ ĐẢM BẢO CHÍNH TẢ:
+  // - Văn bản >= 500 ký tự: luôn gọi AI hiệu đính để sửa chính tả, mở rộng viết tắt
+  // - Văn bản < 500 ký tự: vẫn gọi AI nếu có từ viết tắt hành chính (HĐND, UBND, UBMTTQ...)
+  // - Điều này đảm bảo mọi văn bản hành chính đều được sửa chính tả đúng
+  const LONG_TEXT_THRESHOLD = 500;
+  const hasAdministrativeAbbr = /\b(HĐND|UBND|UB\s*MTTQ|BCH|Đảng\s*uỷ|đảng\s*uỷ)\b/gi.test(raw);
+  let preprocessedText = raw;
+
+  if (raw.length >= LONG_TEXT_THRESHOLD || hasAdministrativeAbbr) {
+    if (onLog) onLog("Đang nhờ AI hiệu đính để sửa chính tả và mở rộng viết tắt...", "info");
+    preprocessedText = await refineTextForReading(raw, apiKey, onLog);
+  }
+
+  // BƯỚC 2: Chuẩn hóa kỹ thuật (ký hiệu, đơn vị, khoảng trắng...) để đọc TTS mượt.
+  const normalizedText = normalizeTextForSpeech(preprocessedText);
+
+  // TỐI ƯU GIỮ TÔNG GIỌNG THỐNG NHẤT:
+  // Ưu tiên đọc liền một đoạn để tránh đổi tông giọng (nam/nữ) giữa các đoạn.
+  // Ngưỡng cao hơn (4000 ký tự) vì văn bản sau khi AI mở rộng viết tắt sẽ dài hơn nhiều.
+  // Chỉ chia đoạn khi thật sự cần thiết (văn bản siêu dài > 4000 ký tự).
+  const SINGLE_SEGMENT_THRESHOLD = 4000; // ký tự - tăng cao để ưu tiên đọc liền một đoạn
+  if (normalizedText.length <= SINGLE_SEGMENT_THRESHOLD) {
+    if (onLog) onLog(`Đọc liền một đoạn (${normalizedText.length} ký tự) để giữ tông giọng thống nhất.`, "info");
+    const buffer = await generateAudioSegment(normalizedText, config, onLog, apiKey);
+    onProgress(100);
+    return buffer;
+  }
   
+  // Chỉ chia đoạn khi văn bản thật sự rất dài (> 4000 ký tự)
+  if (onLog) onLog(`Văn bản rất dài (${normalizedText.length} ký tự), chia thành nhiều đoạn nhưng vẫn giữ cùng giọng đọc.`, "info");
+
   const rawChunks = normalizedText.match(/[^.!?\n]+[.!?\n]*|[^.!?\n]+/g) || [normalizedText];
   const combinedChunks: string[] = [];
   let current = "";
@@ -273,33 +335,16 @@ export const generateAudioParallel = async (text: string, config: any, onProgres
   }
   if (current) combinedChunks.push(current.trim());
 
-  // Adaptive delay: tăng delay nếu gặp rate limit
-  let adaptiveDelay = 1200; // Base delay
   const results: ArrayBuffer[] = [];
-  
+  // Độ trễ động giữa các đoạn để tránh quá tải / hết quota
+  // Văn bản càng dài -> delay càng lớn một chút.
+  const baseDelayMs = normalizedText.length > 3000 ? 2200 : normalizedText.length > 1500 ? 1600 : 1200;
+
   for (let i = 0; i < combinedChunks.length; i++) {
-    if (i > 0) {
-      await delay(adaptiveDelay); // Sử dụng adaptive delay
-      if (onLog) onLog(`Processing segment ${i + 1}/${combinedChunks.length}...`, 'info');
-    }
-    
-    try {
-      const segment = await generateAudioSegment(combinedChunks[i], config, onLog, apiKey);
-      results.push(segment);
-      
-      // Giảm delay nếu response nhanh (thành công)
-      adaptiveDelay = Math.max(adaptiveDelay * 0.95, 800); // Min 800ms
-      
-      onProgress(Math.round(((i + 1) / combinedChunks.length) * 100));
-    } catch (error: any) {
-      // Tăng delay nếu gặp lỗi rate limit
-      const errorInfo = handleAiError(error);
-      if (errorInfo.isRateLimit || errorInfo.shouldWait) {
-        adaptiveDelay = Math.min(adaptiveDelay * 1.5, 5000); // Max 5 seconds
-        if (onLog) onLog(`Rate limit detected, increasing delay to ${Math.round(adaptiveDelay)}ms`, 'warning');
-      }
-      throw error; // Re-throw để caller xử lý retry với key rotation
-    }
+    if (i > 0) await delay(baseDelayMs); // Tránh spam rate limit / quota
+    const segment = await generateAudioSegment(combinedChunks[i], config, onLog, apiKey);
+    results.push(segment);
+    onProgress(Math.round(((i + 1) / combinedChunks.length) * 100));
   }
 
   const totalLength = results.reduce((acc, b) => acc + b.byteLength, 0);
@@ -430,5 +475,15 @@ export const generateAdImage = async (prompt: string, onLog?: any, apiKey: strin
     const part = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
     if (!part) throw new Error("AI không trả về ảnh.");
     return `data:image/png;base64,${part.inlineData.data}`;
-  } catch (e: any) { throw new Error(handleAiError(e).message); }
+  } catch (e: any) {
+    const errorInfo = handleAiError(e);
+    // Thêm thông tin chi tiết hơn cho rate limit và overload errors
+    if (errorInfo.isRateLimit && !errorInfo.isOverload) {
+      throw new Error(`${errorInfo.message} Key có thể đã hết quota cho model tạo ảnh.`);
+    }
+    if (errorInfo.isOverload) {
+      throw new Error(`${errorInfo.message} Server đang quá tải, vui lòng thử lại sau.`);
+    }
+    throw new Error(errorInfo.message);
+  }
 };

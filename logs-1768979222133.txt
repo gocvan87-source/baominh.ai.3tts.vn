@@ -1,0 +1,13 @@
+[14:01:30 21/1/2026] [INFO] Cảm ơn!: Key của bạn đã được kiểm tra và chấp nhận.
+[14:02:53 21/1/2026] [INFO] Cảm ơn!: Key của bạn đã được kiểm tra và chấp nhận.
+[14:03:48 21/1/2026] [INFO] Cảm ơn!: Key của bạn đã được kiểm tra và chấp nhận.
+[14:04:19 21/1/2026] [INFO] Cảm ơn!: Key của bạn đã được kiểm tra và chấp nhận.
+[14:05:11 21/1/2026] [ERROR] Lỗi: ❌ Hết hạn mức (429/Quota exhausted).
+[14:05:12 21/1/2026] [ERROR] Lỗi: ❌ Hết hạn mức (429/Quota exhausted).
+[14:06:28 21/1/2026] [WARNING] Gặp lỗi (❌ Hết hạn mức (429/Quota exhausted). Key có thể đã hết quota cho model tạo ảnh.). Đổi Key khác... (3)
+[14:06:28 21/1/2026] [INFO] Đợi 4s trước khi thử lại (Rate limit)...
+[14:06:32 21/1/2026] [WARNING] Gặp lỗi (❌ Hết hạn mức (429/Quota exhausted). Key có thể đã hết quota cho model tạo ảnh.). Đổi Key khác... (2)
+[14:06:32 21/1/2026] [INFO] Đợi 8s trước khi thử lại (Rate limit)...
+[14:06:40 21/1/2026] [WARNING] Gặp lỗi (❌ Hết hạn mức (429/Quota exhausted). Key có thể đã hết quota cho model tạo ảnh.). Đổi Key khác... (1)
+[14:06:40 21/1/2026] [INFO] Đợi 16s trước khi thử lại (Rate limit)...
+[14:06:56 21/1/2026] [ERROR] Thất bại: Đã hết quota/rate limit. Vui lòng thử lại sau hoặc thêm API Key mới.

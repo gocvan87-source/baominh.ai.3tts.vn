@@ -38,16 +38,6 @@ const ADMIN_PASS = "#Minh@123";
 const GUEST_DAILY_LIMIT = 600; 
 const WEB_APP_URL = window.location.origin;
 
-/**
- * Exponential backoff với jitter để tránh thundering herd khi retry
- */
-const exponentialBackoff = async (retryCount: number, baseDelay: number = 1000): Promise<void> => {
-  const exponentialDelay = baseDelay * Math.pow(2, retryCount);
-  const jitter = Math.random() * 1000; // Random 0-1000ms để tránh synchronized retries
-  const totalDelay = Math.min(exponentialDelay + jitter, 30000); // Max 30 seconds
-  await new Promise(resolve => setTimeout(resolve, totalDelay));
-};
-
 const PLAN_LIMITS: Record<string, number> = {
   'GUEST': 600,
   'TRIAL': 600,       
@@ -359,13 +349,18 @@ const App: React.FC = () => {
     // 3. Ưu tiên Key chung trong DB & Xoay tua (Load Balancing)
     const sharedKeys = validKeysInDb.filter(k => k.allowedUserIds.length === 0);
     if (sharedKeys.length > 0) {
-        // Thực hiện xoay tua ngẫu nhiên nếu có >= 2 key
+        // Thực hiện xoay tua ngẫu nhiên nếu có >= 2 key để chia tải
         const randomIndex = Math.floor(Math.random() * sharedKeys.length);
         return sharedKeys[randomIndex].key;
     }
     
-    // 4. Cuối cùng mới lấy Key mặc định từ Env
-    return process.env.API_KEY || "";
+    // 4. Cuối cùng mới lấy Key mặc định từ Env (nếu nó chưa bị loại trừ)
+    const envKey = process.env.API_KEY || "";
+    if (envKey && !excluded.includes(envKey)) {
+        return envKey;
+    }
+
+    return "";
   };
 
   const handleCreateAudio = async () => {
@@ -400,19 +395,23 @@ const App: React.FC = () => {
             setAllUsers(prev => prev.map(u => u.uid === updated.uid ? updated : u));
         }
       } catch (e: any) {
-        if (e.message.includes("429") || e.message.includes("api key") || e.message.includes("vô hiệu hóa") || e.message.includes("quota")) {
-             // Chỉ đánh dấu Invalid nếu key nằm trong DB (để không ảnh hưởng key Env)
-             if (managedKeys.some(k => k.key === key)) {
+        const err = e.message.toLowerCase();
+        const isRateLimit = err.includes("429") || err.includes("quota") || err.includes("hạn mức") || err.includes("resource exhausted");
+        // Strict check: Chỉ lỗi auth mới tính là Invalid Key
+        const isAuthError = err.includes("api key") || err.includes("403") || err.includes("unauthenticated");
+
+        if (isRateLimit || isAuthError || err.includes("server") || err.includes("fetch")) {
+             // Chỉ đánh dấu Invalid nếu chắc chắn là lỗi Auth
+             if (isAuthError && !isRateLimit && managedKeys.some(k => k.key === key)) {
                 setManagedKeys(prev => prev.map(k => k.key === key ? {...k, status: 'INVALID'} : k));
              }
             
             if (retries > 0) {
-                const retryNumber = 3 - retries; // 0, 1, 2
-                addLog(`Key lỗi/hết hạn. Đợi ${Math.round((1000 * Math.pow(2, retryNumber) + 500) / 1000)}s rồi thử lại (${retries} lần còn lại)...`, 'warning');
-                await exponentialBackoff(retryNumber);
-                await attempt(retries - 1, [...excluded, key]);
+                 addLog(isRateLimit ? `Key bị giới hạn (429). Đổi Key khác... (${retries})` : `Gặp lỗi (${e.message}). Đổi Key khác... (${retries})`, 'warning');
+                 await attempt(retries - 1, [...excluded, key]);
             } else {
-                setState(prev => ({...prev, isGeneratingAudio: false}));
+                 setState(prev => ({...prev, isGeneratingAudio: false}));
+                 showNotification("Thất bại", "Hệ thống đang bận hoặc hết Key. Vui lòng thử lại sau.", "error");
             }
         } else {
             showNotification("Lỗi", e.message, "error");
@@ -448,7 +447,40 @@ const App: React.FC = () => {
   };
 
   const handleSmartPaste = async () => {
-    try { const text = await navigator.clipboard.readText(); if (text) setGeneratedText(prev => prev ? prev + '\n' + text.trim() : text.trim()); } catch (e) { showNotification("Lỗi Clipboard", "Hãy dùng Ctrl+V.", "warning"); }
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) setGeneratedText(prev => prev ? prev + '\n' + text.trim() : text.trim());
+    } catch (e) {
+      showNotification("Lỗi Clipboard", "Hãy dùng Ctrl+V.", "warning");
+    }
+  };
+
+  /**
+   * Trích xuất tiêu đề & nội dung chính từ văn bản thô của file
+   * - Bỏ các dòng meta như "GIỌNG NAM", "GIỌNG NỮ", dòng trống đầu
+   * - Tiêu đề: dòng đầu tiên ngắn, thường là câu độc lập
+   * - Nội dung: phần còn lại, giữ nguyên để đọc sát bản gốc
+   */
+  const extractTitleAndBodyFromText = (raw: string): string => {
+    const lines = raw.split(/\r?\n/).map(l => l.trim());
+    const contentLines: string[] = [];
+
+    for (const line of lines) {
+      if (!line) continue;
+      const upper = line.toUpperCase();
+      // Bỏ các dòng khai báo giọng đọc hoặc meta đầu file
+      if (upper.startsWith("GIỌNG ") || upper.startsWith("GIONG ") || upper.startsWith("VOICE ")) continue;
+      contentLines.push(line);
+    }
+
+    if (contentLines.length === 0) return raw.trim();
+
+    // Dòng đầu tiên là tiêu đề, phần còn lại là nội dung
+    const title = contentLines[0];
+    const body = contentLines.slice(1).join("\n").trim();
+
+    if (!body) return title;
+    return `${title}\n\n${body}`;
   };
 
   // Logic đọc file thông minh
@@ -484,12 +516,16 @@ const App: React.FC = () => {
          } else {
             throw new Error("Thư viện Word chưa tải xong. Vui lòng thử lại.");
          }
+      } else if (fileType === 'doc') {
+         // Không thể đọc trực tiếp .doc trong trình duyệt, hướng dẫn người dùng chuyển sang .docx
+         throw new Error("File .doc (Word cũ) chưa được hỗ trợ. Vui lòng lưu lại thành .docx rồi tải lên.");
       } else {
           throw new Error("Chỉ hỗ trợ file .txt, .pdf, .docx");
       }
 
       if (text.trim()) {
-         setGeneratedText(prev => prev + (prev ? '\n\n' : '') + text);
+         const cleaned = extractTitleAndBodyFromText(text);
+         setGeneratedText(prev => prev + (prev ? '\n\n' : '') + cleaned);
          showNotification("Thành công", `Đã trích xuất văn bản từ ${file.name}`, "success");
       } else {
          showNotification("Lỗi", "File trống hoặc không đọc được nội dung text.", "error");
@@ -626,15 +662,19 @@ const App: React.FC = () => {
            setIsGeneratingAd(false);
         } catch (e: any) {
            const err = e.message.toLowerCase();
-           if (err.includes("429") || err.includes("quota") || err.includes("key")) {
-                setManagedKeys(prev => prev.map(k => k.key === key ? {...k, status: 'INVALID'} : k));
+           const isRateLimit = err.includes("429") || err.includes("quota") || err.includes("hạn mức");
+           // Only mark as invalid if explicitly auth error
+           const isAuthError = err.includes("api key") || err.includes("403") || err.includes("unauthenticated");
+
+           if (isRateLimit || isAuthError || err.includes("server") || err.includes("fetch")) {
+                if (isAuthError && !isRateLimit && managedKeys.some(k => k.key === key)) {
+                    setManagedKeys(prev => prev.map(k => k.key === key ? {...k, status: 'INVALID'} : k));
+                }
                 if (retries > 0) {
-                    const retryNumber = 3 - retries;
-                    addLog(`Key lỗi/hết hạn. Đợi ${Math.round((1000 * Math.pow(2, retryNumber) + 500) / 1000)}s rồi thử lại (${retries} lần còn lại)...`, 'warning');
-                    await exponentialBackoff(retryNumber);
+                    addLog(`Gặp lỗi (${e.message}). Đổi Key khác... (${retries})`, 'warning');
                     await attempt(retries - 1, [...excluded, key]);
                 } else {
-                    showNotification("Thất bại", "Hết lượt thử lại. Vui lòng kiểm tra Key.", "error");
+                    showNotification("Thất bại", "Không thể tạo nội dung lúc này. Vui lòng thử lại sau.", "error");
                     setIsGeneratingAd(false);
                 }
            } else {
@@ -650,34 +690,85 @@ const App: React.FC = () => {
     if (!imageDescription.trim()) return;
     setIsGeneratingAdImage(true);
     
-    const attempt = async (retries = 3, excluded: string[] = []) => {
+    const attempt = async (retries = 3, excluded: string[] = [], isRateLimitRetry = false, isOverloadRetry = false) => {
         const key = selectBestKey(excluded);
         if (!key) {
             showNotification("Hết Key", "Vui lòng thêm API Key mới.", "error");
             setIsGeneratingAdImage(false);
             return;
         }
+        
+        // Exponential backoff: delay tăng dần theo số lần retry
+        if (isRateLimitRetry || isOverloadRetry) {
+            // Với overload: delay lớn hơn (3s, 6s, 12s)
+            // Với rate limit: delay nhỏ hơn (2s, 4s, 8s)
+            const baseDelay = isOverloadRetry ? 3000 : 2000;
+            const delayMs = baseDelay * Math.pow(2, 3 - retries); // Exponential backoff
+            addLog(`Đợi ${delayMs / 1000}s trước khi thử lại${isOverloadRetry ? ' (Server quá tải)' : ' (Rate limit)'}...`, 'info');
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+        
         try {
             const imageUrl = await generateAdImage(imageDescription, addLog, key);
             setAdImagePreview(imageUrl);
             showNotification("AI Hoàn tất", "Đã vẽ ảnh nền quảng cáo.", "success");
+            setIsGeneratingAdImage(false);
         } catch (e: any) {
             const err = e.message.toLowerCase();
-            if (err.includes("429") || err.includes("quota") || err.includes("key")) {
-                setManagedKeys(prev => prev.map(k => k.key === key ? {...k, status: 'INVALID'} : k));
+            // Phát hiện rate limit và quota exhausted
+            const isRateLimit = err.includes("429") || 
+                               err.includes("quota") || 
+                               err.includes("hạn mức") || 
+                               err.includes("resource exhausted") ||
+                               err.includes("quota exhausted") ||
+                               err.includes("rate limit");
+            
+            // Phát hiện overload
+            const isOverload = err.includes("503") ||
+                              err.includes("overload") ||
+                              err.includes("over capacity") ||
+                              err.includes("server quá tải") ||
+                              err.includes("service unavailable");
+            
+            // Strict check: Only auth errors invalidate key
+            const isAuthError = err.includes("api key") || 
+                               err.includes("403") || 
+                               err.includes("unauthenticated") || 
+                               err.includes("401");
+
+            // Handle errors that justify retrying with another key
+            if (isRateLimit || isOverload || isAuthError || err.includes("not found") || err.includes("500")) {
+                // Only invalidate key in DB if strictly an Auth Error and NOT a rate limit/overload
+                if (isAuthError && !isRateLimit && !isOverload && managedKeys.some(k => k.key === key)) {
+                    setManagedKeys(prev => prev.map(k => k.key === key ? {...k, status: 'INVALID'} : k));
+                }
+                
+                // Với rate limit/overload: không loại key ngay, có thể thử lại sau
+                // Với auth error: loại key khỏi pool
+                const shouldExcludeKey = isAuthError || (!isRateLimit && !isOverload);
+                
                 if (retries > 0) {
-                    const retryNumber = 3 - retries;
-                    addLog(`Key lỗi/hết hạn. Đợi ${Math.round((1000 * Math.pow(2, retryNumber) + 500) / 1000)}s rồi thử lại (${retries} lần còn lại)...`, 'warning');
-                    await exponentialBackoff(retryNumber);
-                    await attempt(retries - 1, [...excluded, key]);
+                    if (isRateLimit || isOverload) {
+                        addLog(`Gặp lỗi (${e.message}). Đổi Key khác... (${retries})`, 'warning');
+                        // Với rate limit/overload, thử key khác nhưng không loại key hiện tại (có thể dùng lại sau)
+                        await attempt(retries - 1, shouldExcludeKey ? [...excluded, key] : excluded, isRateLimit, isOverload);
+                    } else {
+                        addLog(`Gặp lỗi (${e.message}). Đổi Key khác... (${retries})`, 'warning');
+                        await attempt(retries - 1, shouldExcludeKey ? [...excluded, key] : excluded, false, false);
+                    }
                 } else {
-                    showNotification("Thất bại", "Hết lượt thử lại. Vui lòng kiểm tra Key.", "error");
+                    const errorMsg = isOverload 
+                        ? "Server đang quá tải. Vui lòng thử lại sau vài phút."
+                        : isRateLimit
+                        ? "Đã hết quota/rate limit. Vui lòng thử lại sau hoặc thêm API Key mới."
+                        : "Không thể tạo ảnh lúc này. Vui lòng thử lại sau.";
+                    showNotification("Thất bại", errorMsg, "error");
+                    setIsGeneratingAdImage(false);
                 }
             } else {
                 showNotification("Lỗi AI", e.message, "error");
+                setIsGeneratingAdImage(false);
             }
-        } finally {
-            setIsGeneratingAdImage(false);
         }
     };
     await attempt();
@@ -759,12 +850,16 @@ const App: React.FC = () => {
             setIsAnalyzingVoice(false);
         } catch (e: any) {
             const err = e.message.toLowerCase();
-            if (err.includes("429") || err.includes("quota") || err.includes("key")) {
-                setManagedKeys(prev => prev.map(k => k.key === key ? {...k, status: 'INVALID'} : k));
+            const isRateLimit = err.includes("429") || err.includes("quota") || err.includes("hạn mức");
+            // Strict check
+            const isAuthError = err.includes("api key") || err.includes("403") || err.includes("unauthenticated");
+
+            if (isRateLimit || isAuthError || err.includes("server")) {
+                if (isAuthError && !isRateLimit && managedKeys.some(k => k.key === key)) {
+                    setManagedKeys(prev => prev.map(k => k.key === key ? {...k, status: 'INVALID'} : k));
+                }
                 if (retries > 0) {
-                    const retryNumber = 3 - retries;
-                    addLog(`Key lỗi/hết hạn. Đợi ${Math.round((1000 * Math.pow(2, retryNumber) + 500) / 1000)}s rồi thử lại (${retries} lần còn lại)...`, 'warning');
-                    await exponentialBackoff(retryNumber);
+                    addLog(`Key lỗi/hết hạn. Thử lại (${retries})...`, 'warning');
                     await attempt(retries - 1, [...excluded, key]);
                 } else {
                     showNotification("Thất bại", "Hết lượt thử lại. Vui lòng kiểm tra Key.", "error");
@@ -1301,11 +1396,163 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {isContributingKey && (<div className="fixed inset-0 z-[210] flex items-center justify-center p-6 bg-slate-900/95 backdrop-blur-xl animate-in fade-in"><div className="bg-white w-full max-w-xl rounded-[3rem] p-12 shadow-2xl relative"><button onClick={() => setIsContributingKey(false)} className="absolute top-8 right-8 text-slate-300 hover:text-red-500"><X className="w-8 h-8"/></button><div className="text-center mb-6"><div className="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-[2rem] flex items-center justify-center mx-auto mb-6"><Gift className="w-10 h-10"/></div><h3 className="text-2xl font-black text-slate-800 uppercase">Đóng góp API Key</h3></div><div className="space-y-6"><input value={newKeyData.key} onChange={e => setNewKeyData({...newKeyData, key: e.target.value})} className="w-full p-5 bg-slate-50 border-2 rounded-2xl font-bold text-sm outline-none" placeholder="AIzaSy..."/><button onClick={async () => { if(!newKeyData.key) return; setIsTestingNewKey(true); const test = await testApiKey(newKeyData.key.trim()); setIsTestingNewKey(false); if (!test.valid) return showNotification("Lỗi", test.message, "error"); const newKey: ManagedKey = { id: `key-${Date.now()}`, name: 'Key Tặng', key: newKeyData.key.trim(), status: 'VALID', usageCount: 0, isTrialKey: false, allowedUserIds: [] }; setManagedKeys([newKey, ...managedKeys]); setIsContributingKey(false); showNotification("Cảm ơn!", "Key của bạn đã được kiểm tra và chấp nhận.", "success"); }} disabled={isTestingNewKey} className="w-full py-6 bg-emerald-600 text-white rounded-2xl font-black uppercase shadow-xl transition-all hover:bg-emerald-700 disabled:opacity-50">{isTestingNewKey ? <Loader2 className="w-6 h-6 animate-spin mx-auto"/> : "Xác nhận tặng"}</button></div></div></div>)}
+      {isContributingKey && (
+        <div className="fixed inset-0 z-[210] flex items-center justify-center p-6 bg-slate-900/95 backdrop-blur-xl animate-in fade-in">
+          <div className="bg-white w-full max-w-xl rounded-[3rem] p-12 shadow-2xl relative">
+            <button
+              onClick={() => setIsContributingKey(false)}
+              className="absolute top-8 right-8 text-slate-300 hover:text-red-500"
+            >
+              <X className="w-8 h-8" />
+            </button>
+
+            <div className="text-center mb-6">
+              <div className="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-[2rem] flex items-center justify-center mx-auto mb-6">
+                <Gift className="w-10 h-10" />
+              </div>
+              <h3 className="text-2xl font-black text-slate-800 uppercase">Đóng góp API Key</h3>
+            </div>
+
+            <div className="space-y-6 text-left">
+              <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 text-xs leading-relaxed text-slate-700">
+                <p className="font-black uppercase text-emerald-700 mb-2">Cách tạo Google Gemini API Key</p>
+                <ol className="list-decimal list-inside space-y-1">
+                  <li>
+                    Mở trang{" "}
+                    <a
+                      href="https://aistudio.google.com/app/apikey"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-emerald-700 underline font-semibold"
+                    >
+                      Google AI Studio - API Key
+                    </a>
+                    .
+                  </li>
+                  <li>Đăng nhập tài khoản Google của bạn (nên dùng tài khoản chính, đã xác minh).</li>
+                  <li>Nếu được hỏi, đồng ý điều khoản sử dụng và bật Gemini API.</li>
+                  <li>Bấm nút <span className="font-semibold">Create API key</span> → chọn dự án mặc định.</li>
+                  <li>Sao chép chuỗi key bắt đầu bằng <span className="font-mono text-[11px]">AIza...</span> và dán vào ô bên dưới.</li>
+                </ol>
+                <p className="mt-3 text-[11px] text-slate-500">
+                  Lưu ý: Key của bạn chỉ được dùng cho hệ thống Bảo Minh AI, không chia sẻ công khai để tránh bị lạm dụng.
+                </p>
+              </div>
+
+              <input
+                value={newKeyData.key}
+                onChange={e => setNewKeyData({ ...newKeyData, key: e.target.value })}
+                className="w-full p-5 bg-slate-50 border-2 rounded-2xl font-bold text-sm outline-none"
+                placeholder="Dán API Key dạng AIzaSy..."
+              />
+
+              <button
+                onClick={async () => {
+                  if (!newKeyData.key) return;
+                  setIsTestingNewKey(true);
+                  const test = await testApiKey(newKeyData.key.trim());
+                  setIsTestingNewKey(false);
+                  if (!test.valid) return showNotification("Lỗi", test.message, "error");
+                  const newKey: ManagedKey = {
+                    id: `key-${Date.now()}`,
+                    name: 'Key Tặng',
+                    key: newKeyData.key.trim(),
+                    status: 'VALID',
+                    usageCount: 0,
+                    isTrialKey: false,
+                    allowedUserIds: []
+                  };
+                  setManagedKeys([newKey, ...managedKeys]);
+                  setIsContributingKey(false);
+                  showNotification("Cảm ơn!", "Key của bạn đã được kiểm tra và chấp nhận.", "success");
+                }}
+                disabled={isTestingNewKey}
+                className="w-full py-6 bg-emerald-600 text-white rounded-2xl font-black uppercase shadow-xl transition-all hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {isTestingNewKey ? <Loader2 className="w-6 h-6 animate-spin mx-auto" /> : "Xác nhận tặng"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {editingVoice && (<div className="fixed inset-0 z-[160] flex items-center justify-center p-6 bg-slate-900/60 backdrop-blur-md animate-in fade-in"><div className="bg-white w-full max-w-xl rounded-[3rem] p-10 shadow-2xl"><div className="flex justify-between items-center mb-8"><h3 className="text-xl font-black uppercase text-slate-800">{editingVoice.id ? 'Sửa giọng Clone' : 'Thêm giọng thủ công'}</h3><button onClick={() => setEditingVoice(null)}><X className="w-6 h-6"/></button></div><div className="space-y-6"><div><p className="text-xs font-black uppercase text-slate-400 mb-2">Tên gợi nhớ</p><input value={editingVoice.name || ''} onChange={e => setEditingVoice({...editingVoice, name: e.target.value})} className="w-full p-4 bg-slate-50 rounded-2xl font-bold text-sm outline-none" placeholder="Ví dụ: Giọng MC VTV1"/></div><div className="flex gap-4"> <div className="flex-1"><p className="text-xs font-black uppercase text-slate-400 mb-2">Giới tính</p><select value={editingVoice.gender || 'Nữ'} onChange={e => setEditingVoice({...editingVoice, gender: e.target.value as 'Nam'|'Nữ'})} className="w-full p-4 bg-slate-50 rounded-2xl font-bold text-sm outline-none"><option value="Nam">Nam</option><option value="Nữ">Nữ</option></select></div><div className="flex-1"><p className="text-xs font-black uppercase text-slate-400 mb-2">Vùng miền</p><select value={editingVoice.region || 'Bắc'} onChange={e => setEditingVoice({...editingVoice, region: e.target.value as any})} className="w-full p-4 bg-slate-50 rounded-2xl font-bold text-sm outline-none"><option value="Bắc">Bắc</option><option value="Trung">Trung</option><option value="Nam">Nam</option></select></div></div><div><p className="text-xs font-black uppercase text-slate-400 mb-2">Mô tả (Tone giọng)</p><input value={editingVoice.description || ''} onChange={e => setEditingVoice({...editingVoice, description: e.target.value})} className="w-full p-4 bg-slate-50 rounded-2xl font-bold text-sm outline-none" placeholder="Trầm, ấm, truyền cảm..."/></div><button onClick={handleSaveVoice} className="w-full py-5 bg-indigo-600 text-white rounded-[2rem] font-black uppercase shadow-xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-2"><Save className="w-5 h-5"/> Lưu giọng đọc</button></div></div></div>)}
 
-      {showVoicePanel && (<div className="fixed inset-0 z-[150] flex items-end md:items-center justify-center p-0 md:p-6 bg-slate-900/60 backdrop-blur-md animate-in fade-in"><div className="bg-white w-full max-w-6xl md:rounded-[3rem] rounded-t-[3rem] p-10 shadow-2xl flex flex-col max-h-[90vh] overflow-hidden"><div className="flex items-center justify-between mb-8 shrink-0"><h3 className="text-3xl font-black text-slate-800">Thư viện giọng đọc</h3><button onClick={() => setShowVoicePanel(false)} className="p-4 bg-slate-50 rounded-2xl text-slate-400 hover:text-red-500 transition-all shadow-inner"><X className="w-6 h-6"/></button></div><div className="flex gap-4 mb-8 shrink-0"><button onClick={() => setVoicePanelTab('PRESET')} className={`px-8 py-4 rounded-2xl text-[11px] font-black uppercase ${voicePanelTab === 'PRESET' ? 'bg-slate-900 text-white' : 'text-slate-400'}`}>Có sẵn</button><button onClick={() => setVoicePanelTab('CLONE')} className={`px-8 py-4 rounded-2xl text-[11px] font-black uppercase ${voicePanelTab === 'CLONE' ? 'bg-indigo-600 text-white' : 'text-slate-400'}`}>Clone giọng AI</button></div><div className="flex-1 overflow-y-auto scrollbar-hide pb-10">{voicePanelTab === 'PRESET' ? (<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">{PRESET_VOICES.map(voice => (<div key={voice.id} onClick={() => { setConfig({...config, activePresetId: voice.id, voiceName: voice.baseVoice, useClonedVoice: false}); setShowVoicePanel(false); }} className={`group p-8 rounded-[2.5rem] border-4 transition-all cursor-pointer ${config.activePresetId === voice.id && !config.useClonedVoice ? 'bg-indigo-600 border-indigo-600 text-white shadow-2xl' : 'bg-white border-slate-50 hover:border-indigo-200'}`}><p className="text-[15px] font-black mb-1">{voice.label}</p><span className="text-[9px] font-black uppercase opacity-60">{voice.gender} • {voice.tags[0]}</span></div>))}</div>) : (<div className="flex flex-col lg:flex-row gap-8"><div className="lg:w-1/3 space-y-4"><div className={`border-4 border-dashed rounded-[2.5rem] h-64 flex flex-col items-center justify-center p-6 text-center transition-all ${cloneFile ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 hover:border-indigo-400 hover:bg-indigo-50'}`} onClick={() => cloneInputRef.current?.click()}><input type="file" ref={cloneInputRef} accept="audio/*" className="hidden" onChange={e => e.target.files && setCloneFile(e.target.files[0])}/>{cloneFile ? (<><CheckCircle2 className="w-12 h-12 text-emerald-500 mb-2"/><p className="text-sm font-black text-slate-800">{cloneFile.name}</p><p className="text-xs text-slate-400 mt-1">Đã sẵn sàng phân tích</p></>) : (<><Upload className="w-12 h-12 text-slate-300 mb-2"/><p className="text-sm font-black text-slate-400">Chọn file ghi âm giọng mẫu</p><p className="text-[10px] text-slate-300 mt-1">MP3, WAV, M4A (Max 10MB)</p></>)}</div><button onClick={handleCloneVoice} disabled={!cloneFile || isAnalyzingVoice} className="w-full py-4 bg-indigo-600 text-white rounded-2xl text-[11px] font-black uppercase shadow-xl flex items-center justify-center gap-2 hover:bg-indigo-700 disabled:opacity-50 transition-all">{isAnalyzingVoice ? <Loader2 className="w-5 h-5 animate-spin"/> : <Sparkles className="w-5 h-5"/>} <span>Phân tích & Clone</span></button><button onClick={() => setEditingVoice({})} className="w-full py-4 bg-slate-50 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-2xl text-[11px] font-black uppercase shadow-inner flex items-center justify-center gap-2 transition-all border border-slate-100"><Plus className="w-5 h-5"/> <span>Thêm thủ công</span></button></div><div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[400px] overflow-y-auto scrollbar-hide">{clonedVoices.length > 0 ? clonedVoices.map(voice => (<div key={voice.id} onClick={() => { setConfig({...config, useClonedVoice: true, activeClonedVoiceId: voice.id, voiceName: voice.gender === 'Nam' ? 'Fenrir' : 'Kore'}); setShowVoicePanel(false); }} className={`p-6 rounded-[2rem] border-2 cursor-pointer transition-all ${config.useClonedVoice && config.activeClonedVoiceId === voice.id ? 'bg-indigo-600 border-indigo-600 text-white shadow-xl' : 'bg-white border-slate-100 hover:border-indigo-300'}`}><div className="flex justify-between items-start mb-2"><div className="flex items-center gap-3"><div className={`w-10 h-10 rounded-xl flex items-center justify-center ${voice.gender === 'Nam' ? 'bg-blue-100 text-blue-600' : 'bg-pink-100 text-pink-600'}`}><Fingerprint className="w-5 h-5"/></div><div><p className="text-sm font-black">{voice.name}</p><p className="text-[9px] uppercase opacity-70">{voice.gender} • {voice.region}</p></div></div><div className="flex gap-1"><button onClick={(e) => { e.stopPropagation(); setEditingVoice(voice); }} className="text-slate-300 hover:text-indigo-500 p-2 hover:bg-indigo-50 rounded-lg transition-all"><PenTool className="w-4 h-4"/></button><button onClick={(e) => { e.stopPropagation(); setClonedVoices(prev => prev.filter(v => v.id !== voice.id)); }} className="text-slate-300 hover:text-red-500 p-2 hover:bg-red-50 rounded-lg transition-all"><Trash2 className="w-4 h-4"/></button></div></div><p className="text-[10px] opacity-60 line-clamp-2">{voice.description}</p></div>)) : (<div className="col-span-full flex flex-col items-center justify-center text-slate-400 py-10"><Fingerprint className="w-12 h-12 mb-2 opacity-20"/><p className="text-xs font-bold uppercase">Chưa có giọng Clone nào</p></div>)}</div></div>)}</div></div></div>)}
+      {showVoicePanel && (
+        <div className="fixed inset-0 z-[150] flex items-end md:items-center justify-center p-0 md:p-6 bg-slate-900/60 backdrop-blur-md animate-in fade-in">
+          <div className="bg-white w-full max-w-6xl md:rounded-[3rem] rounded-t-[3rem] p-10 shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
+            <div className="flex items-center justify-between mb-8 shrink-0">
+              <h3 className="text-3xl font-black text-slate-800">Thư viện giọng đọc</h3>
+              <button onClick={() => setShowVoicePanel(false)} className="p-4 bg-slate-50 rounded-2xl text-slate-400 hover:text-red-500 transition-all shadow-inner"><X className="w-6 h-6"/></button>
+            </div>
+            <div className="flex gap-4 mb-8 shrink-0">
+              <button onClick={() => setVoicePanelTab('PRESET')} className={`px-8 py-4 rounded-2xl text-[11px] font-black uppercase ${voicePanelTab === 'PRESET' ? 'bg-slate-900 text-white' : 'text-slate-400'}`}>Có sẵn</button>
+              <button onClick={() => setVoicePanelTab('CLONE')} className={`px-8 py-4 rounded-2xl text-[11px] font-black uppercase ${voicePanelTab === 'CLONE' ? 'bg-indigo-600 text-white' : 'text-slate-400'}`}>Clone giọng AI</button>
+            </div>
+            <div className="flex-1 overflow-y-auto scrollbar-hide pb-10">
+              {voicePanelTab === 'PRESET' ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {PRESET_VOICES.map(voice => (
+                    <div key={voice.id} onClick={() => { setConfig({...config, activePresetId: voice.id, voiceName: voice.baseVoice, useClonedVoice: false}); setShowVoicePanel(false); }} className={`group p-8 rounded-[2.5rem] border-4 transition-all cursor-pointer ${config.activePresetId === voice.id && !config.useClonedVoice ? 'bg-indigo-600 border-indigo-600 text-white shadow-2xl' : 'bg-white border-slate-50 hover:border-indigo-200'}`}>
+                      <p className="text-[15px] font-black mb-1">{voice.label}</p>
+                      <span className="text-[9px] font-black uppercase opacity-60">{voice.gender} • {voice.tags[0]}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex flex-col lg:flex-row gap-8">
+                  <div className="lg:w-1/3 space-y-4">
+                    <div className={`border-4 border-dashed rounded-[2.5rem] h-64 flex flex-col items-center justify-center p-6 text-center transition-all ${cloneFile ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 hover:border-indigo-400 hover:bg-indigo-50'}`} onClick={() => cloneInputRef.current?.click()}>
+                      <input type="file" ref={cloneInputRef} accept="audio/*" className="hidden" onChange={e => e.target.files && setCloneFile(e.target.files[0])}/>
+                      {cloneFile ? (
+                        <>
+                          <CheckCircle2 className="w-12 h-12 text-emerald-500 mb-2"/>
+                          <p className="text-sm font-black text-slate-800">{cloneFile.name}</p>
+                          <p className="text-xs text-slate-400 mt-1">Đã sẵn sàng phân tích</p>
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-12 h-12 text-slate-300 mb-2"/>
+                          <p className="text-sm font-black text-slate-400">Chọn file ghi âm giọng mẫu</p>
+                          <p className="text-[10px] text-slate-300 mt-1">MP3, WAV, M4A (Max 10MB)</p>
+                        </>
+                      )}
+                    </div>
+                    <button onClick={handleCloneVoice} disabled={!cloneFile || isAnalyzingVoice} className="w-full py-4 bg-indigo-600 text-white rounded-2xl text-[11px] font-black uppercase shadow-xl flex items-center justify-center gap-2 hover:bg-indigo-700 disabled:opacity-50 transition-all">
+                      {isAnalyzingVoice ? <Loader2 className="w-5 h-5 animate-spin"/> : <Sparkles className="w-5 h-5"/>} <span>Phân tích & Clone</span>
+                    </button>
+                    <button onClick={() => setEditingVoice({})} className="w-full py-4 bg-slate-50 text-slate-500 rounded-2xl text-[11px] font-black uppercase shadow-sm hover:text-indigo-600 hover:bg-white border border-transparent hover:border-indigo-100 transition-all flex items-center justify-center gap-2 mt-4">
+                      <Plus className="w-5 h-5"/> <span>Thêm thủ công</span>
+                    </button>
+                  </div>
+                  <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[400px] overflow-y-auto scrollbar-hide">
+                    {clonedVoices.length > 0 ? clonedVoices.map(voice => (
+                      <div key={voice.id} onClick={() => { setConfig({...config, useClonedVoice: true, activeClonedVoiceId: voice.id, voiceName: voice.gender === 'Nam' ? 'Fenrir' : 'Kore'}); setShowVoicePanel(false); }} className={`p-6 rounded-[2rem] border-2 cursor-pointer transition-all ${config.useClonedVoice && config.activeClonedVoiceId === voice.id ? 'bg-indigo-600 border-indigo-600 text-white shadow-xl' : 'bg-white border-slate-100 hover:border-indigo-300'}`}>
+                        <div className="flex justify-between items-start mb-2">
+                          <div className="flex items-center gap-3">
+                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${voice.gender === 'Nam' ? 'bg-blue-100 text-blue-600' : 'bg-pink-100 text-pink-600'}`}><Fingerprint className="w-5 h-5"/></div>
+                            <div><p className="text-sm font-black">{voice.name}</p><p className="text-[9px] uppercase opacity-70">{voice.gender} • {voice.region}</p></div>
+                          </div>
+                          <div className="flex gap-1">
+                            <button onClick={(e) => { e.stopPropagation(); setEditingVoice(voice); }} className="text-slate-300 hover:text-indigo-500 p-2 hover:bg-indigo-50 rounded-lg transition-all"><PenTool className="w-4 h-4"/></button>
+                            <button onClick={(e) => { e.stopPropagation(); setClonedVoices(prev => prev.filter(v => v.id !== voice.id)); }} className="text-slate-300 hover:text-red-500 p-2 hover:bg-red-50 rounded-lg transition-all"><Trash2 className="w-4 h-4"/></button>
+                          </div>
+                        </div>
+                        <p className="text-[10px] opacity-60 line-clamp-2">{voice.description}</p>
+                      </div>
+                    )) : (
+                      <div className="col-span-full flex flex-col items-center justify-center text-slate-400 py-10">
+                        <Fingerprint className="w-12 h-12 mb-2 opacity-20"/>
+                        <p className="text-xs font-bold uppercase">Chưa có giọng Clone nào</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
