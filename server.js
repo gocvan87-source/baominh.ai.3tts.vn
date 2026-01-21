@@ -133,8 +133,30 @@ const SEPAY_WEBHOOK_API_KEY = process.env.SEPAY_WEBHOOK_API_KEY || "";
 // Helper: cộng thêm monthCount vào 1 timestamp (ms)
 function addMonths(from, monthCount) {
   const d = new Date(from);
-  d.setMonth(d.getMonth() + monthCount);
-  return d.getTime();
+  const currentMonth = d.getMonth();
+  const currentYear = d.getFullYear();
+  const currentDate = d.getDate();
+  
+  // Tính tháng và năm mới
+  let newMonth = currentMonth + monthCount;
+  let newYear = currentYear;
+  
+  // Xử lý trường hợp vượt quá 12 tháng
+  while (newMonth >= 12) {
+    newMonth -= 12;
+    newYear += 1;
+  }
+  while (newMonth < 0) {
+    newMonth += 12;
+    newYear -= 1;
+  }
+  
+  // Tạo ngày mới, xử lý trường hợp ngày không hợp lệ (ví dụ: 31/2)
+  const daysInNewMonth = new Date(newYear, newMonth + 1, 0).getDate();
+  const finalDate = Math.min(currentDate, daysInNewMonth);
+  
+  const newDate = new Date(newYear, newMonth, finalDate, d.getHours(), d.getMinutes(), d.getSeconds());
+  return newDate.getTime();
 }
 
 // Webhook nhận từ SePay

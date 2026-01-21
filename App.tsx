@@ -127,6 +127,13 @@ const App: React.FC = () => {
   const showNotification = (title: string, message: string, type: 'error' | 'warning' | 'success' | 'info' = 'info', actionLabel?: string, onAction?: () => void) => {
     setNotification({ open: true, title, message, type, actionLabel, onAction });
     addLog(`${title}: ${message}`, type === 'success' ? 'info' : type);
+    
+    // Tự động đóng sau 5 giây (trừ khi có action button)
+    if (!actionLabel) {
+      setTimeout(() => {
+        setNotification(null);
+      }, 5000);
+    }
   };
 
   const [activeMode, setActiveMode] = useState<ReadingMode>(ReadingMode.NEWS);
@@ -848,7 +855,9 @@ const App: React.FC = () => {
           }
         }
         
-        const expiryDateStr = new Date(newExpiry).toLocaleDateString('vi-VN', {
+        // Format ngày tháng chính xác
+        const expiryDate = new Date(newExpiry);
+        const expiryDateStr = expiryDate.toLocaleDateString('vi-VN', {
           day: '2-digit',
           month: '2-digit',
           year: 'numeric',
@@ -856,12 +865,28 @@ const App: React.FC = () => {
           minute: '2-digit'
         });
         
+        // Lấy thông tin gói để hiển thị
+        const planInfo = [
+          { plan: "MONTHLY", label: "1 tháng", months: 1 },
+          { plan: "3MONTHS", label: "3 tháng", months: 3 },
+          { plan: "6MONTHS", label: "6 tháng", months: 6 },
+          { plan: "YEARLY", label: "12 tháng", months: 12 }
+        ].find(p => p.plan === newPlanType);
+        
+        const planLabel = planInfo ? planInfo.label : newPlanType;
+        
+        // Hiển thị thông báo với thông tin chi tiết
         showNotification(
           "🎉 Thanh toán thành công!", 
-          `Gói ${newPlanType} đã được kích hoạt. Hạn dùng đến ${expiryDateStr}.`, 
+          `Gói ${planLabel} đã được kích hoạt thành công!\nHạn dùng đến: ${expiryDateStr}\nSố ký tự/ngày: 50.000`, 
           "success"
         );
-        addLog(`✅ Thanh toán thành công! Gói ${newPlanType} đã được kích hoạt. Hạn dùng: ${expiryDateStr}`, "info");
+        addLog(`✅ Thanh toán thành công! Gói ${planLabel} đã được kích hoạt. Hạn dùng: ${expiryDateStr}`, "info");
+        
+        // Đảm bảo modal đóng lại
+        setTimeout(() => {
+          setIsPricingModalOpen(false);
+        }, 2000);
         setSelectedPlan(null);
         stopPaymentPolling();
         return true;
@@ -1949,6 +1974,52 @@ const App: React.FC = () => {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Notification Toast */}
+      {notification && notification.open && (
+        <div className="fixed top-6 right-6 z-[300] animate-in slide-in-from-top-2 fade-in duration-300">
+          <div className={`min-w-[320px] max-w-md rounded-2xl shadow-2xl border-2 p-6 backdrop-blur-xl ${
+            notification.type === 'success' ? 'bg-emerald-50 border-emerald-200' :
+            notification.type === 'error' ? 'bg-red-50 border-red-200' :
+            notification.type === 'warning' ? 'bg-amber-50 border-amber-200' :
+            'bg-blue-50 border-blue-200'
+          }`}>
+            <div className="flex items-start gap-4">
+              <div className={`flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center ${
+                notification.type === 'success' ? 'bg-emerald-600 text-white' :
+                notification.type === 'error' ? 'bg-red-600 text-white' :
+                notification.type === 'warning' ? 'bg-amber-600 text-white' :
+                'bg-blue-600 text-white'
+              }`}>
+                {notification.type === 'success' ? '✓' :
+                 notification.type === 'error' ? '✕' :
+                 notification.type === 'warning' ? '⚠' : 'ℹ'}
+              </div>
+              <div className="flex-1 min-w-0">
+                <h4 className="font-black text-slate-800 mb-1 text-sm">{notification.title}</h4>
+                <p className="text-xs text-slate-600 whitespace-pre-line">{notification.message}</p>
+                {notification.actionLabel && notification.onAction && (
+                  <button
+                    onClick={() => {
+                      notification.onAction?.();
+                      setNotification(null);
+                    }}
+                    className="mt-3 px-4 py-2 bg-slate-900 text-white rounded-xl text-[10px] font-black uppercase hover:bg-slate-800 transition-all"
+                  >
+                    {notification.actionLabel}
+                  </button>
+                )}
+              </div>
+              <button
+                onClick={() => setNotification(null)}
+                className="flex-shrink-0 text-slate-400 hover:text-slate-600 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
           </div>
         </div>
