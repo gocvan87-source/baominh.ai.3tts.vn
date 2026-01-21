@@ -177,6 +177,7 @@ app.post('/api/sepay_webhook', async (req, res) => {
     // 2. Đọc thông tin giao dịch từ payload
     // SePay có thể gửi với nhiều format khác nhau
     const amount = parseInt(
+      payload.transferAmount ||  // SePay format
       payload.amount || 
       payload.money || 
       payload.amount_money ||
@@ -185,32 +186,39 @@ app.post('/api/sepay_webhook', async (req, res) => {
     );
     const description = (
       payload.description || 
-      payload.content || 
+      payload.content ||      // SePay format
       payload.note || 
       payload.message ||
       payload.transaction_content ||
       ""
     ).toString();
+    
+    // SePay gửi transferType: "in" = có tiền vào (thành công)
+    const transferType = (payload.transferType || "").toLowerCase();
     const status = (
       payload.status || 
       payload.state ||
       payload.transaction_status ||
+      (transferType === "in" ? "success" : "") ||  // Nếu transferType = "in" thì coi là success
       ""
     ).toLowerCase();
     const transId = String(
+      payload.id ||            // SePay format (39636347)
+      payload.referenceCode || // SePay format (FT26022754795688)
       payload.transId || 
-      payload.id || 
       payload.transaction_id ||
       payload.trans_id ||
       payload.code ||
       ""
     );
     
-    console.log(`📊 Transaction info: amount=${amount}, status="${status}", transId="${transId}", description="${description.substring(0, 100)}"`);
+    console.log(`📊 Transaction info: amount=${amount}, status="${status}", transferType="${transferType}", transId="${transId}"`);
+    console.log(`📊 Description: "${description.substring(0, 200)}"`);
 
-    // Chỉ xử lý giao dịch thành công
-    if (!["success", "thanh_cong", "completed", "thanh toán thành công"].includes(status)) {
-      console.log(`ℹ️ Webhook: Ignore transaction với status "${status}"`);
+    // Chỉ xử lý giao dịch thành công: status = success HOẶC transferType = "in"
+    const isSuccess = transferType === "in" || ["success", "thanh_cong", "completed", "thanh toán thành công"].includes(status);
+    if (!isSuccess) {
+      console.log(`ℹ️ Webhook: Ignore transaction với status="${status}", transferType="${transferType}"`);
       return res.status(200).json({ ok: true, message: "Ignore non-success transaction" });
     }
 
@@ -221,13 +229,30 @@ app.post('/api/sepay_webhook', async (req, res) => {
       return res.status(200).json({ ok: true, message: "Unknown amount, ignore" });
     }
 
-    // 4. Tìm loginId trong nội dung: dạng VT-loginId
-    const match = description.match(/VT-([a-zA-Z0-9_.-]+)/i);
+    // 4. Tìm loginId trong nội dung: dạng VT-loginId hoặc VTloginId (không có dấu gạch)
+    // SePay có thể gửi: "VTtruong2024vn" hoặc "VT-truong2024.vn"
+    let match = description.match(/VT-([a-zA-Z0-9_.-]+)/i);  // Tìm VT-{loginId}
     if (!match) {
-      console.log(`ℹ️ Webhook: No payment code (VT-xxx) found in "${description}"`);
-      return res.status(200).json({ ok: true, message: "No payment code (VT-xxx) found" });
+      match = description.match(/VT([a-zA-Z0-9_.-]+)/i);     // Tìm VT{loginId} (không có dấu gạch)
     }
-    const loginId = match[1].toLowerCase();
+    
+    if (!match) {
+      console.log(`ℹ️ Webhook: No payment code (VT-xxx or VTxxx) found in "${description}"`);
+      return res.status(200).json({ ok: true, message: "No payment code (VT-xxx or VTxxx) found" });
+    }
+    
+    let loginId = match[1].toLowerCase();
+    // Xử lý trường hợp SePay gửi "VTtruong2024vn" -> cần tách thành "truong2024.vn"
+    // Nếu loginId không có dấu chấm và có "vn" ở cuối, có thể là domain
+    if (loginId.endsWith("vn") && !loginId.includes(".")) {
+      // Thử tách: "truong2024vn" -> "truong2024.vn"
+      const withoutVn = loginId.slice(0, -2);
+      if (withoutVn.length > 0) {
+        loginId = `${withoutVn}.vn`;
+      }
+    }
+    
+    console.log(`🔍 Extracted loginId: "${loginId}" from description`);
 
     // 5. Tải danh sách users từ DB
     const usersRes = await pool.query('SELECT data FROM bm_settings WHERE id = $1', ['users']);
@@ -353,6 +378,43 @@ app.post('/api/test_webhook', async (req, res) => {
     return res.json({ ok: true, message: "Test webhook received", body: req.body, headers: req.headers });
   } catch (err) {
     console.error("❌ Test webhook error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// API: Test với payload mẫu từ SePay
+app.post('/api/test_sepay_payload', async (req, res) => {
+  try {
+    // Payload mẫu từ log của user
+    const testPayload = {
+      "gateway": "MBBank",
+      "transactionDate": "2026-01-21 23:49:15",
+      "accountNumber": "0986234983",
+      "subAccount": "VQRQAGPFR0030",
+      "code": null,
+      "content": "Qagpfr0030 SEPAY7855 1 VTtruong2024vn FT26022076312003 Trace 465173",
+      "transferType": "in",
+      "description": "BankAPINotify Qagpfr0030 SEPAY7855 1 VTtruong2024vn FT26022076312003 Trace 465173",
+      "transferAmount": 150000,
+      "referenceCode": "FT26022754795688",
+      "accumulated": 5777029,
+      "id": 39636347
+    };
+    
+    // Gọi lại webhook với payload test
+    const result = await fetch(`http://localhost:${port}/api/sepay_webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Apikey ${SEPAY_WEBHOOK_API_KEY || 'test-key'}`
+      },
+      body: JSON.stringify(testPayload)
+    });
+    
+    const resultData = await result.json();
+    return res.json({ ok: true, testResult: resultData });
+  } catch (err) {
+    console.error("❌ Test SePay payload error:", err);
     return res.status(500).json({ error: err.message });
   }
 });
