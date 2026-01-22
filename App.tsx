@@ -124,12 +124,12 @@ const App: React.FC = () => {
     open: boolean; title: string; message: string; type: 'error' | 'warning' | 'success' | 'info'; actionLabel?: string; onAction?: () => void;
   } | null>(null);
 
-  const showNotification = (title: string, message: string, type: 'error' | 'warning' | 'success' | 'info' = 'info', actionLabel?: string, onAction?: () => void) => {
+  const showNotification = (title: string, message: string, type: 'error' | 'warning' | 'success' | 'info' = 'info', actionLabel?: string, onAction?: () => void, autoClose: boolean = true) => {
     setNotification({ open: true, title, message, type, actionLabel, onAction });
     addLog(`${title}: ${message}`, type === 'success' ? 'info' : type);
     
-    // Tự động đóng sau 5 giây (trừ khi có action button)
-    if (!actionLabel) {
+    // Tự động đóng sau 5 giây (chỉ khi autoClose = true và không có action button)
+    if (autoClose && !actionLabel) {
       setTimeout(() => {
         setNotification(null);
       }, 5000);
@@ -875,18 +875,18 @@ const App: React.FC = () => {
         
         const planLabel = planInfo ? planInfo.label : newPlanType;
         
-        // Hiển thị thông báo với thông tin chi tiết
+        // Hiển thị thông báo với thông tin chi tiết (không tự động đóng)
         showNotification(
           "🎉 Thanh toán thành công!", 
           `Gói ${planLabel} đã được kích hoạt thành công!\nHạn dùng đến: ${expiryDateStr}\nSố ký tự/ngày: 50.000`, 
-          "success"
+          "success",
+          undefined,
+          undefined,
+          false // Không tự động đóng, để người dùng tự đóng
         );
         addLog(`✅ Thanh toán thành công! Gói ${planLabel} đã được kích hoạt. Hạn dùng: ${expiryDateStr}`, "info");
         
-        // Đảm bảo modal đóng lại
-        setTimeout(() => {
-          setIsPricingModalOpen(false);
-        }, 2000);
+        // Không tự động đóng modal, để người dùng tự đóng sau khi xem thông báo
         setSelectedPlan(null);
         stopPaymentPolling();
         return true;
@@ -1281,8 +1281,93 @@ const App: React.FC = () => {
                 <ChevronDown className="w-4 h-4 text-slate-400"/>
               </button>
               {showProfileMenu && (
-                <div className="absolute right-0 mt-3 w-64 bg-white rounded-2xl shadow-2xl border p-2 z-[70] animate-in fade-in">
-                  <div className="p-3 bg-slate-50 rounded-xl mb-1 flex items-center justify-between"><span className="text-[10px] font-black text-slate-500 uppercase">Gói: {currentUser.planType}</span><Zap className="w-3 h-3 text-amber-500"/></div>
+                <div className="absolute right-0 mt-3 w-72 bg-white rounded-2xl shadow-2xl border p-3 z-[70] animate-in fade-in">
+                  {/* Thông tin gói cước và ngày hết hạn */}
+                  <div className="space-y-2 mb-3 pb-3 border-b">
+                    {/* Gói cước */}
+                    <div className="flex items-center justify-between p-2 bg-gradient-to-r from-indigo-50 to-blue-50 rounded-xl">
+                      <div className="flex items-center gap-2">
+                        <Zap className="w-4 h-4 text-amber-500"/>
+                        <span className="text-[10px] font-black text-slate-600 uppercase">Gói:</span>
+                        <span className="text-[11px] font-black text-indigo-600">
+                          {currentUser.planType === 'MONTHLY' ? '1 tháng' :
+                           currentUser.planType === '3MONTHS' ? '3 tháng' :
+                           currentUser.planType === '6MONTHS' ? '6 tháng' :
+                           currentUser.planType === 'YEARLY' ? '12 tháng' :
+                           currentUser.planType === 'GUEST' ? 'Dùng thử' :
+                           currentUser.planType === 'TRIAL' ? 'Dùng thử' :
+                           currentUser.planType}
+                        </span>
+                      </div>
+                    </div>
+                    
+                    {/* Ngày hết hạn */}
+                    {currentUser.expiryDate && currentUser.expiryDate > 0 ? (
+                      <div className="flex items-center justify-between p-2 bg-slate-50 rounded-xl">
+                        <div className="flex items-center gap-2">
+                          <CalendarClock className="w-4 h-4 text-slate-500"/>
+                          <span className="text-[10px] font-bold text-slate-600">Hết hạn:</span>
+                        </div>
+                        <span className="text-[10px] font-black text-slate-800">
+                          {new Date(currentUser.expiryDate).toLocaleDateString('vi-VN', {
+                            day: '2-digit',
+                            month: '2-digit',
+                            year: 'numeric'
+                          })}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between p-2 bg-amber-50 rounded-xl">
+                        <div className="flex items-center gap-2">
+                          <CalendarClock className="w-4 h-4 text-amber-500"/>
+                          <span className="text-[10px] font-bold text-amber-600">Chưa có gói</span>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Tài nguyên API Key */}
+                    {(() => {
+                      const totalKeys = managedKeys.length;
+                      const validKeys = managedKeys.filter(k => k.status === 'VALID').length;
+                      const keyPercentage = totalKeys > 0 ? Math.round((validKeys / totalKeys) * 100) : 0;
+                      const keyColorClass = keyPercentage >= 70 ? 'text-emerald-500' : keyPercentage >= 40 ? 'text-amber-500' : 'text-red-500';
+                      const keyBgClass = keyPercentage >= 70 ? 'bg-emerald-500' : keyPercentage >= 40 ? 'bg-amber-500' : 'bg-red-500';
+                      const keyTextClass = keyPercentage >= 70 ? 'text-emerald-600' : keyPercentage >= 40 ? 'text-amber-600' : 'text-red-600';
+                      
+                      return (
+                        <button
+                          onClick={() => {
+                            setShowProfileMenu(false);
+                            if (currentUser?.role === 'ADMIN') {
+                              setActiveMode(ReadingMode.ADMIN_PANEL);
+                              setIsAdminTab('KEYS');
+                            } else {
+                              showNotification("Thông tin", `API Keys: ${validKeys}/${totalKeys} hoạt động (${keyPercentage}%)`, "info");
+                            }
+                          }}
+                          className="w-full flex items-center justify-between p-2 bg-slate-50 hover:bg-slate-100 rounded-xl transition-all group"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Key className={`w-4 h-4 ${keyColorClass}`}/>
+                            <span className="text-[10px] font-bold text-slate-600">API Keys:</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 w-20 bg-slate-200 rounded-full h-2 overflow-hidden">
+                              <div 
+                                className={`h-full ${keyBgClass} transition-all`}
+                                style={{ width: `${keyPercentage}%` }}
+                              />
+                            </div>
+                            <span className={`text-[10px] font-black ${keyTextClass} min-w-[35px] text-right`}>
+                              {keyPercentage}%
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })()}
+                  </div>
+                  
+                  {/* Các nút chức năng */}
                   <button
                     onClick={() => { setIsPricingModalOpen(true); setShowProfileMenu(false); }}
                     className="w-full flex items-center gap-3 px-4 py-3 text-[11px] font-bold text-slate-600 hover:bg-emerald-50 rounded-xl"
