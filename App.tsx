@@ -1,11 +1,11 @@
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { 
-  TTSProvider, ReadingMode, VoiceConfig, GenerationState, UserProfile, ClonedVoice, PlanType, ManagedKey, AdCampaign
+  TTSProvider, ReadingMode, VoiceConfig, GenerationState, UserProfile, ClonedVoice, PlanType, ManagedKey, AdCampaign, Abbreviation
 } from './types';
 import { READING_MODES, PRESET_VOICES } from './constants';
 import { 
-  generateContentFromDescription, generateAudioParallel, pcmToWav, pcmToMp3, analyzeVoice, generateMarketingContent, generateAdImage, testApiKey
+  generateContentFromDescription, generateAudioParallel, pcmToWav, pcmToMp3, analyzeVoice, generateMarketingContent, generateAdImage, testApiKey, extractAbbreviations
 } from './services/gemini';
 import { 
   Sparkles, Loader2, Download, Settings2, 
@@ -27,7 +27,7 @@ import {
   Facebook, Twitter, Copy,
   Save, PenTool, Filter, SortAsc, SortDesc,
   LifeBuoy, RefreshCcw, HardDriveDownload, HardDriveUpload,
-  Server, ToggleLeft, ToggleRight
+  Server, ToggleLeft, ToggleRight, BookOpen, Plus
 } from 'lucide-react';
 
 const AUTHOR_ZALO = "0986.234.983"; 
@@ -111,6 +111,189 @@ const PublicAdView: React.FC<{ ad: AdCampaign }> = ({ ad }) => {
   );
 };
 
+// --- COMPONENT: DICTIONARY MANAGER ---
+const DictionaryManager = ({ abbreviations, onUpdate, onAdd, onDelete, onEdit, isVisible, onClose }: any) => {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editAbbr, setEditAbbr] = useState('');
+  const [editFullText, setEditFullText] = useState('');
+  const [newAbbr, setNewAbbr] = useState('');
+  const [newFullText, setNewFullText] = useState('');
+
+  const handleStartEdit = (item: Abbreviation) => {
+    setEditingId(item.id);
+    setEditAbbr(item.abbreviation);
+    setEditFullText(item.fullText);
+  };
+
+  const handleSaveEdit = () => {
+    if (editingId && editAbbr.trim() && editFullText.trim()) {
+      onEdit(editingId, editAbbr.trim(), editFullText.trim());
+      setEditingId(null);
+      setEditAbbr('');
+      setEditFullText('');
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setEditingId(null);
+    setEditAbbr('');
+    setEditFullText('');
+  };
+
+  const handleAddNew = () => {
+    if (newAbbr.trim() && newFullText.trim()) {
+      onAdd(newAbbr.trim(), newFullText.trim());
+      setNewAbbr('');
+      setNewFullText('');
+    }
+  };
+
+  if (!isVisible) return null;
+
+  return (
+    <div className="bg-slate-900 rounded-2xl border border-slate-800 p-6 space-y-4 animate-in slide-in-from-bottom">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-indigo-500/20 rounded-xl">
+            <BookOpen className="w-5 h-5 text-indigo-400" />
+          </div>
+          <div>
+            <h3 className="text-lg font-bold text-white">Từ điển từ viết tắt</h3>
+            <p className="text-xs text-slate-400">Quản lý các từ viết tắt đã phát hiện</p>
+          </div>
+        </div>
+        <button
+          onClick={onClose}
+          className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"
+        >
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+
+      {/* Add New Row */}
+      <div className="bg-slate-950 border border-slate-700 rounded-xl p-4 space-y-3">
+        <div className="flex items-center gap-2 text-sm font-semibold text-slate-300">
+          <Plus className="w-4 h-4" />
+          Thêm từ viết tắt mới
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+          <input
+            type="text"
+            placeholder="Từ viết tắt (VD: HĐND)"
+            value={newAbbr}
+            onChange={(e) => setNewAbbr(e.target.value)}
+            className="md:col-span-2 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+          />
+          <input
+            type="text"
+            placeholder="Câu đầy đủ (VD: Hội đồng nhân dân)"
+            value={newFullText}
+            onChange={(e) => setNewFullText(e.target.value)}
+            className="md:col-span-2 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+          />
+          <button
+            onClick={handleAddNew}
+            disabled={!newAbbr.trim() || !newFullText.trim()}
+            className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2 rounded-lg text-sm transition-colors flex items-center justify-center gap-2"
+          >
+            <Plus className="w-4 h-4" /> Thêm
+          </button>
+        </div>
+      </div>
+
+      {/* Dictionary Table */}
+      <div className="bg-slate-950 rounded-xl border border-slate-800 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-slate-900 text-slate-300 uppercase font-bold text-xs">
+              <tr>
+                <th className="p-4">Từ viết tắt</th>
+                <th className="p-4">Câu đầy đủ</th>
+                <th className="p-4 text-right">Hành động</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800">
+              {abbreviations.length === 0 ? (
+                <tr>
+                  <td colSpan={3} className="p-8 text-center text-slate-500">
+                    Chưa có từ viết tắt nào. Hãy thêm mới hoặc để AI phát hiện từ văn bản.
+                  </td>
+                </tr>
+              ) : (
+                abbreviations.map((item: Abbreviation) => (
+                  <tr key={item.id} className="hover:bg-slate-800/50">
+                    {editingId === item.id ? (
+                      <>
+                        <td className="p-4">
+                          <input
+                            type="text"
+                            value={editAbbr}
+                            onChange={(e) => setEditAbbr(e.target.value)}
+                            className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                          />
+                        </td>
+                        <td className="p-4">
+                          <input
+                            type="text"
+                            value={editFullText}
+                            onChange={(e) => setEditFullText(e.target.value)}
+                            className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                          />
+                        </td>
+                        <td className="p-4 text-right">
+                          <div className="flex justify-end gap-2">
+                            <button
+                              onClick={handleSaveEdit}
+                              className="p-1.5 bg-emerald-600 hover:bg-emerald-500 rounded text-white"
+                              title="Lưu"
+                            >
+                              <Save className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={handleCancelEdit}
+                              className="p-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
+                              title="Hủy"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="p-4 font-mono text-indigo-400 font-semibold">{item.abbreviation}</td>
+                        <td className="p-4 text-slate-300">{item.fullText}</td>
+                        <td className="p-4 text-right">
+                          <div className="flex justify-end gap-2">
+                            <button
+                              onClick={() => handleStartEdit(item)}
+                              className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-400 hover:text-indigo-400 transition-colors"
+                              title="Sửa"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => onDelete(item.id)}
+                              className="p-1.5 bg-slate-800 hover:bg-red-500/20 rounded text-slate-400 hover:text-red-400 transition-colors"
+                              title="Xóa"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const App: React.FC = () => {
   const [publicAd, setPublicAd] = useState<AdCampaign | null>(null);
   const [isLoadingPublicAd, setIsLoadingPublicAd] = useState(false);
@@ -150,6 +333,16 @@ const App: React.FC = () => {
   const [lastCheckedPlanType, setLastCheckedPlanType] = useState<string>("");
   const [isAIPromptOpen, setIsAIPromptOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  
+  // Dictionary States
+  const [abbreviations, setAbbreviations] = useState<Abbreviation[]>([]);
+  const [showDictionary, setShowDictionary] = useState(false);
+  const [isExtractingAbbr, setIsExtractingAbbr] = useState(false);
+  
+  // Pending abbreviations from analysis - waiting for user confirmation
+  const [pendingAbbreviations, setPendingAbbreviations] = useState<Array<{ abbreviation: string; fullText: string }>>([]);
+  const [showAbbreviationModal, setShowAbbreviationModal] = useState(false);
+  const [abbreviationModalResolve, setAbbreviationModalResolve] = useState<((confirmed: boolean) => void) | null>(null);
   
   // State quản lý Admin Panel
   const [isAddingUser, setIsAddingUser] = useState(false);
@@ -226,10 +419,20 @@ const App: React.FC = () => {
   });
 
   const syncToDb = async (key: string, data: any) => {
-    try { await fetch(`/api/data/${key}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }); } catch (e) {}
+    try { 
+      const url = key === 'abbreviations' ? '/api/data/abbreviations' : `/api/data/${key}`;
+      await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }); 
+    } catch (e) {}
   };
   const loadFromDb = async (key: string) => {
-    try { const res = await fetch(`/api/data/${key}`); if (!res.ok) return null; return await res.json(); } catch (e) { return null; }
+    try { 
+      const url = key === 'abbreviations' ? '/api/data/abbreviations' : `/api/data/${key}`;
+      const res = await fetch(url); 
+      if (!res.ok) return null; 
+      const data = await res.json();
+      // Abbreviations API trả về mảng trực tiếp, không có wrapper
+      return Array.isArray(data) ? data : (data?.data || null);
+    } catch (e) { return null; }
   };
 
   const checkAndResetDailyLimit = (user: UserProfile): UserProfile => {
@@ -275,11 +478,12 @@ const App: React.FC = () => {
     const initData = async () => {
       if (window.location.pathname.startsWith('/ad/')) return;
 
-      const [dbUsers, dbClones, dbKeys, dbAds, dbSystem] = await Promise.all([
-        loadFromDb('users'), loadFromDb('clonedVoices'), loadFromDb('managedKeys'), loadFromDb('ad_campaigns'), loadFromDb('systemConfig')
+      const [dbUsers, dbClones, dbKeys, dbAds, dbSystem, dbAbbrs] = await Promise.all([
+        loadFromDb('users'), loadFromDb('clonedVoices'), loadFromDb('managedKeys'), loadFromDb('ad_campaigns'), loadFromDb('systemConfig'), loadFromDb('abbreviations')
       ]);
       if (dbUsers) setAllUsers(dbUsers);
       if (dbClones) setClonedVoices(dbClones);
+      if (Array.isArray(dbAbbrs)) setAbbreviations(dbAbbrs);
       if (dbKeys) setManagedKeys(dbKeys);
       if (dbSystem && typeof dbSystem.useEnvKeyOnly === 'boolean') setUseEnvKeyOnly(dbSystem.useEnvKeyOnly);
       if (dbAds && Array.isArray(dbAds)) {
@@ -316,6 +520,8 @@ const App: React.FC = () => {
   useEffect(() => { if (adCampaigns.length > 0) syncToDb('ad_campaigns', adCampaigns); }, [adCampaigns]);
   // Lưu cấu hình hệ thống
   useEffect(() => { syncToDb('systemConfig', { useEnvKeyOnly }); }, [useEnvKeyOnly]);
+  // Auto-save abbreviations
+  useEffect(() => { syncToDb('abbreviations', abbreviations); }, [abbreviations]);
 
   useEffect(() => {
     if (activeAdCampaign && !sessionStorage.getItem('bm_ad_seen') && !publicAd) {
@@ -379,6 +585,136 @@ const App: React.FC = () => {
     return "";
   };
 
+  // Dictionary Functions
+  const handleExtractAbbreviations = async () => {
+    const text = generatedText || description;
+    if (!text.trim()) {
+      showNotification("Lỗi", "Văn bản trống. Hãy nhập văn bản trước.", "warning");
+      return;
+    }
+    
+    const key = selectBestKey();
+    if (!key) {
+      showNotification("Lỗi", "Cần có API Key để trích xuất từ viết tắt.", "error");
+      return;
+    }
+
+    setIsExtractingAbbr(true);
+    try {
+      const extracted = await extractAbbreviations(text, key, (msg, type) => {
+        if (type === 'info') showNotification("Thông tin", msg, "info");
+      });
+
+      if (extracted.length > 0) {
+        setAbbreviations(prev => {
+          const existingAbbrs = new Set(prev.map(a => a.abbreviation.toUpperCase()));
+          const newAbbrs: Abbreviation[] = extracted
+            .filter(item => !existingAbbrs.has(item.abbreviation.toUpperCase()))
+            .map(item => ({
+              id: `abbr-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+              abbreviation: item.abbreviation,
+              fullText: item.fullText,
+              createdAt: Date.now(),
+              updatedAt: Date.now()
+            }));
+
+          if (newAbbrs.length > 0) {
+            setShowDictionary(true);
+            showNotification("Thành công", `Đã phát hiện ${newAbbrs.length} từ viết tắt mới.`, "success");
+            return [...prev, ...newAbbrs];
+          } else {
+            showNotification("Thông tin", "Tất cả từ viết tắt đã có trong từ điển.", "info");
+            return prev;
+          }
+        });
+      } else {
+        showNotification("Thông tin", "Không phát hiện từ viết tắt nào trong văn bản.", "info");
+      }
+    } catch (e: any) {
+      showNotification("Lỗi", `Không thể trích xuất từ viết tắt: ${e.message}`, "error");
+    } finally {
+      setIsExtractingAbbr(false);
+    }
+  };
+
+  const handleAddAbbreviation = (abbr: string, fullText: string) => {
+    const newAbbr: Abbreviation = {
+      id: `abbr-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      abbreviation: abbr,
+      fullText: fullText,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    setAbbreviations(prev => [...prev, newAbbr]);
+  };
+
+  const handleEditAbbreviation = (id: string, abbr: string, fullText: string) => {
+    setAbbreviations(prev => prev.map(item => 
+      item.id === id 
+        ? { ...item, abbreviation: abbr, fullText: fullText, updatedAt: Date.now() }
+        : item
+    ));
+  };
+
+  const handleDeleteAbbreviation = (id: string) => {
+    if (confirm('Bạn có chắc muốn xóa từ viết tắt này?')) {
+      setAbbreviations(prev => prev.filter(item => item.id !== id));
+    }
+  };
+
+  // Handlers for Abbreviation Confirmation Modal
+  const handleAbbreviationModalConfirm = () => {
+    // Thêm các pending abbreviations vào từ điển
+    const newAbbrs: Abbreviation[] = pendingAbbreviations.map(item => ({
+      id: `abbr-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      abbreviation: item.abbreviation,
+      fullText: item.fullText,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    }));
+    
+    setAbbreviations(prev => {
+      const existingAbbrs = new Set(prev.map(a => a.abbreviation.toUpperCase()));
+      const uniqueNewAbbrs = newAbbrs.filter(item => 
+        !existingAbbrs.has(item.abbreviation.toUpperCase())
+      );
+      return [...prev, ...uniqueNewAbbrs];
+    });
+    
+    // Đóng modal và resolve Promise
+    setShowAbbreviationModal(false);
+    setPendingAbbreviations([]);
+    if (abbreviationModalResolve) {
+      abbreviationModalResolve(true);
+      setAbbreviationModalResolve(null);
+    }
+  };
+
+  const handleAbbreviationModalCancel = () => {
+    // Đóng modal và resolve Promise với false
+    setShowAbbreviationModal(false);
+    setPendingAbbreviations([]);
+    if (abbreviationModalResolve) {
+      abbreviationModalResolve(false);
+      setAbbreviationModalResolve(null);
+    }
+  };
+
+  const handleAbbreviationModalEdit = (index: number, abbr: string, fullText: string) => {
+    const updated = [...pendingAbbreviations];
+    updated[index] = { abbreviation: abbr, fullText };
+    setPendingAbbreviations(updated);
+  };
+
+  const handleAbbreviationModalDelete = (index: number) => {
+    const updated = pendingAbbreviations.filter((_, i) => i !== index);
+    setPendingAbbreviations(updated);
+  };
+
+  const handleAbbreviationModalAdd = (abbr: string, fullText: string) => {
+    setPendingAbbreviations(prev => [...prev, { abbreviation: abbr, fullText }]);
+  };
+
   const handleCreateAudio = async () => {
     if (!currentUser) return setIsAuthModalOpen(true);
     const text = generatedText || description;
@@ -400,7 +736,59 @@ const App: React.FC = () => {
           return;
       }
       try {
-        const buffer = await generateAudioParallel(text, config, setProgress, addLog, key);
+        // 1. Extract abbreviations trước (nếu cần) và hiển thị modal xác nhận
+        const LONG_TEXT_THRESHOLD = 500;
+        const hasAdministrativeAbbr = /\b(HĐND|UBND|UB\s*MTTQ|BCH|Đảng\s*uỷ|đảng\s*uỷ)\b/gi.test(text);
+        
+        if (text.length >= LONG_TEXT_THRESHOLD || hasAdministrativeAbbr) {
+          try {
+            const extracted = await extractAbbreviations(text, key);
+            if (extracted.length > 0) {
+              // Lọc các abbreviations mới (chưa có trong từ điển)
+              const existingAbbrs = new Set(abbreviations.map(a => a.abbreviation.toUpperCase()));
+              const newAbbrs = extracted.filter(item => 
+                !existingAbbrs.has(item.abbreviation.toUpperCase())
+              );
+              
+              if (newAbbrs.length > 0) {
+                // Hiển thị modal và đợi người dùng xác nhận
+                const confirmed = await new Promise<boolean>((resolve) => {
+                  setPendingAbbreviations(newAbbrs);
+                  setShowAbbreviationModal(true);
+                  setAbbreviationModalResolve(() => resolve);
+                });
+                
+                if (!confirmed) {
+                  // Người dùng hủy, dừng quá trình generate audio
+                  setState(prev => ({...prev, isGeneratingAudio: false}));
+                  return;
+                }
+              }
+            }
+          } catch (e) {
+            // Nếu extract lỗi, vẫn tiếp tục generate audio
+            console.warn("Không thể extract abbreviations:", e);
+          }
+        }
+        
+        // 2. Generate Speech (sau khi đã xác nhận abbreviations)
+        // Lấy abbreviations mới nhất - sử dụng functional update để đảm bảo có dữ liệu mới nhất
+        let finalAbbreviations = abbreviations;
+        setAbbreviations(prev => {
+          finalAbbreviations = prev;
+          return prev;
+        });
+        
+        const buffer = await generateAudioParallel(
+          text, 
+          config, 
+          setProgress, 
+          addLog, 
+          key, 
+          finalAbbreviations, // Sử dụng abbreviations đã được cập nhật
+          // Không cần callback nữa vì đã extract trước
+          undefined
+        );
         const wavUrl = URL.createObjectURL(pcmToWav(buffer));
         const mp3Url = URL.createObjectURL(pcmToMp3(buffer));
         setState(prev => ({ ...prev, audioUrl: wavUrl, mp3Url, isGeneratingAudio: false }));
@@ -1662,6 +2050,28 @@ const App: React.FC = () => {
                    <div className="px-8 py-5 border-b flex items-center justify-between bg-slate-50/50">
                       <div className="flex items-center gap-4"><div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center text-indigo-600"><FileText className="w-5 h-5"/></div><span className="text-[11px] font-black uppercase text-slate-800 tracking-wider">Văn bản ({generatedText.length.toLocaleString()} ký tự)</span></div>
                       <div className="flex gap-2">
+                         <button 
+                           onClick={handleExtractAbbreviations}
+                           disabled={isExtractingAbbr || !generatedText.trim()}
+                           className="p-3 text-slate-500 hover:text-indigo-600 rounded-xl border shadow-sm disabled:opacity-50 flex items-center gap-1" 
+                           title="Phát hiện từ viết tắt từ văn bản"
+                         >
+                           {isExtractingAbbr ? <Loader2 className="w-5 h-5 animate-spin"/> : <BookOpen className="w-5 h-5"/>}
+                           <span className="text-[10px] hidden sm:inline">Phát hiện</span>
+                         </button>
+                         <button 
+                           onClick={() => setShowDictionary(!showDictionary)}
+                           className="p-3 text-slate-500 hover:text-indigo-600 rounded-xl border shadow-sm flex items-center gap-1" 
+                           title="Mở/Đóng từ điển"
+                         >
+                           <BookOpen className="w-5 h-5"/>
+                           <span className="text-[10px] hidden sm:inline">Từ điển</span>
+                           {abbreviations.length > 0 && (
+                             <span className="ml-1 px-1.5 py-0.5 bg-indigo-500 text-white text-[9px] rounded-full">
+                               {abbreviations.length}
+                             </span>
+                           )}
+                         </button>
                          <button onClick={() => fileInputRef.current?.click()} className="p-3 text-slate-500 hover:text-indigo-600 rounded-xl border shadow-sm relative group" title="Nhập từ file (PDF, TXT, DOCX)">
                            {isReadingFile ? <Loader2 className="w-5 h-5 animate-spin"/> : <FileUp className="w-5 h-5"/>}
                            <input type="file" ref={fileInputRef} className="hidden" accept=".txt,.pdf,.docx" onChange={handleFileSelect} />
@@ -1694,6 +2104,30 @@ const App: React.FC = () => {
                     </div>
                   </div>
                 )}
+                
+                {/* Dictionary Manager */}
+                {showDictionary && (
+                  <DictionaryManager
+                    abbreviations={abbreviations}
+                    onUpdate={setAbbreviations}
+                    onAdd={handleAddAbbreviation}
+                    onEdit={handleEditAbbreviation}
+                    onDelete={handleDeleteAbbreviation}
+                    isVisible={showDictionary}
+                    onClose={() => setShowDictionary(false)}
+                  />
+                )}
+
+                {/* Abbreviation Confirmation Modal */}
+                <AbbreviationConfirmationModal
+                  isOpen={showAbbreviationModal}
+                  pendingAbbrs={pendingAbbreviations}
+                  onConfirm={handleAbbreviationModalConfirm}
+                  onCancel={handleAbbreviationModalCancel}
+                  onEdit={handleAbbreviationModalEdit}
+                  onDelete={handleAbbreviationModalDelete}
+                  onAdd={handleAbbreviationModalAdd}
+                />
               </div>
             </div>
           )}

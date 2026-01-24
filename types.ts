@@ -118,6 +118,14 @@ export interface GenerationState {
   audioBuffer: ArrayBuffer | null;
 }
 
+export interface Abbreviation {
+  id: string;
+  abbreviation: string;        // Từ viết tắt (VD: "HĐND")
+  fullText: string;            // Câu đầy đủ (VD: "Hội đồng nhân dân")
+  createdAt: number;
+  updatedAt: number;
+}
+
 declare global {
   interface Window {
     lamejs?: any;
