@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { 
   TTSProvider, ReadingMode, VoiceConfig, GenerationState, UserProfile, ClonedVoice, PlanType, ManagedKey, AdCampaign, Abbreviation
@@ -27,7 +26,7 @@ import {
   Facebook, Twitter, Copy,
   Save, PenTool, Filter, SortAsc, SortDesc,
   LifeBuoy, RefreshCcw, HardDriveDownload, HardDriveUpload,
-  Server, ToggleLeft, ToggleRight, BookOpen, Plus
+  Server, ToggleLeft, ToggleRight, BookOpen
 } from 'lucide-react';
 
 const AUTHOR_ZALO = "0986.234.983"; 
@@ -288,6 +287,248 @@ const DictionaryManager = ({ abbreviations, onUpdate, onAdd, onDelete, onEdit, i
               )}
             </tbody>
           </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- COMPONENT: ABBREVIATION CONFIRMATION MODAL ---
+const AbbreviationConfirmationModal = ({ 
+  isOpen, 
+  pendingAbbrs, 
+  onConfirm, 
+  onCancel,
+  onEdit,
+  onDelete,
+  onAdd
+}: {
+  isOpen: boolean;
+  pendingAbbrs: Array<{ abbreviation: string; fullText: string }>;
+  onConfirm: () => void;
+  onCancel: () => void;
+  onEdit: (index: number, abbr: string, fullText: string) => void;
+  onDelete: (index: number) => void;
+  onAdd: (abbr: string, fullText: string) => void;
+}) => {
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editAbbr, setEditAbbr] = useState('');
+  const [editFullText, setEditFullText] = useState('');
+  const [newAbbr, setNewAbbr] = useState('');
+  const [newFullText, setNewFullText] = useState('');
+  const [localAbbrs, setLocalAbbrs] = useState<Array<{ abbreviation: string; fullText: string }>>([]);
+
+  useEffect(() => {
+    if (isOpen) {
+      setLocalAbbrs([...pendingAbbrs]);
+    }
+  }, [isOpen, pendingAbbrs]);
+
+  const handleStartEdit = (index: number) => {
+    setEditingIndex(index);
+    setEditAbbr(localAbbrs[index].abbreviation);
+    setEditFullText(localAbbrs[index].fullText);
+  };
+
+  const handleSaveEdit = () => {
+    if (editingIndex !== null && editAbbr.trim() && editFullText.trim()) {
+      const updated = [...localAbbrs];
+      updated[editingIndex] = { abbreviation: editAbbr.trim(), fullText: editFullText.trim() };
+      setLocalAbbrs(updated);
+      onEdit(editingIndex, editAbbr.trim(), editFullText.trim());
+      setEditingIndex(null);
+      setEditAbbr('');
+      setEditFullText('');
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setEditingIndex(null);
+    setEditAbbr('');
+    setEditFullText('');
+  };
+
+  const handleDelete = (index: number) => {
+    if (window.confirm('Bạn có chắc muốn xóa từ viết tắt này?')) {
+      const updated = localAbbrs.filter((_, i) => i !== index);
+      setLocalAbbrs(updated);
+      onDelete(index);
+    }
+  };
+
+  const handleAddNew = () => {
+    if (newAbbr.trim() && newFullText.trim()) {
+      const updated = [...localAbbrs, { abbreviation: newAbbr.trim(), fullText: newFullText.trim() }];
+      setLocalAbbrs(updated);
+      onAdd(newAbbr.trim(), newFullText.trim());
+      setNewAbbr('');
+      setNewFullText('');
+    }
+  };
+
+  const handleConfirm = () => {
+    onConfirm();
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+      <div className="bg-slate-900 rounded-2xl border border-slate-800 p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto shadow-2xl">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-indigo-500/20 rounded-xl">
+              <BookOpen className="w-6 h-6 text-indigo-400" />
+            </div>
+            <div>
+              <h3 className="text-xl font-bold text-white">Xác nhận từ viết tắt đã phát hiện</h3>
+              <p className="text-sm text-slate-400">Đã phát hiện {localAbbrs.length} từ viết tắt. Vui lòng xem lại và chỉnh sửa nếu cần.</p>
+            </div>
+          </div>
+          <button
+            onClick={onCancel}
+            className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Add New Row */}
+        <div className="bg-slate-950 border border-slate-700 rounded-xl p-4 space-y-3 mb-4">
+          <div className="flex items-center gap-2 text-sm font-semibold text-slate-300">
+            <Plus className="w-4 h-4" />
+            Thêm từ viết tắt mới
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+            <input
+              type="text"
+              placeholder="Từ viết tắt (VD: HĐND)"
+              value={newAbbr}
+              onChange={(e) => setNewAbbr(e.target.value)}
+              className="md:col-span-2 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+            />
+            <input
+              type="text"
+              placeholder="Câu đầy đủ (VD: Hội đồng nhân dân)"
+              value={newFullText}
+              onChange={(e) => setNewFullText(e.target.value)}
+              className="md:col-span-2 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+            />
+            <button
+              onClick={handleAddNew}
+              disabled={!newAbbr.trim() || !newFullText.trim()}
+              className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2 rounded-lg text-sm transition-colors flex items-center justify-center gap-2"
+            >
+              <Plus className="w-4 h-4" /> Thêm
+            </button>
+          </div>
+        </div>
+
+        {/* Abbreviations Table */}
+        <div className="bg-slate-950 rounded-xl border border-slate-800 overflow-hidden mb-4">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-slate-900 text-slate-300 uppercase font-bold text-xs">
+                <tr>
+                  <th className="p-4">Từ viết tắt</th>
+                  <th className="p-4">Câu đầy đủ</th>
+                  <th className="p-4 text-right">Hành động</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {localAbbrs.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className="p-8 text-center text-slate-500">
+                      Không có từ viết tắt nào.
+                    </td>
+                  </tr>
+                ) : (
+                  localAbbrs.map((item, index) => (
+                    <tr key={index} className="hover:bg-slate-800/50">
+                      {editingIndex === index ? (
+                        <>
+                          <td className="p-4">
+                            <input
+                              type="text"
+                              value={editAbbr}
+                              onChange={(e) => setEditAbbr(e.target.value)}
+                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                            />
+                          </td>
+                          <td className="p-4">
+                            <input
+                              type="text"
+                              value={editFullText}
+                              onChange={(e) => setEditFullText(e.target.value)}
+                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                            />
+                          </td>
+                          <td className="p-4">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                onClick={handleSaveEdit}
+                                className="p-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-white transition-colors"
+                                title="Lưu"
+                              >
+                                <Save className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={handleCancelEdit}
+                                className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-400 hover:text-white transition-colors"
+                                title="Hủy"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </>
+                      ) : (
+                        <>
+                          <td className="p-4 font-semibold text-white">{item.abbreviation}</td>
+                          <td className="p-4 text-slate-300">{item.fullText}</td>
+                          <td className="p-4">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                onClick={() => handleStartEdit(index)}
+                                className="p-1.5 bg-slate-800 hover:bg-indigo-500/20 rounded text-slate-400 hover:text-indigo-400 transition-colors"
+                                title="Sửa"
+                              >
+                                <Edit3 className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => handleDelete(index)}
+                                className="p-1.5 bg-slate-800 hover:bg-red-500/20 rounded text-slate-400 hover:text-red-400 transition-colors"
+                                title="Xóa"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </>
+                      )}
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Action Buttons */}
+        <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors"
+          >
+            Hủy
+          </button>
+          <button
+            onClick={handleConfirm}
+            className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg transition-colors flex items-center gap-2"
+          >
+            <Save className="w-4 h-4" />
+            Đồng ý và tiếp tục
+          </button>
         </div>
       </div>
     </div>
