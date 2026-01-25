@@ -426,9 +426,9 @@ const AbbreviationConfirmationModal = ({
 
         {/* Abbreviations Table */}
         <div className="bg-slate-950 rounded-xl border border-slate-800 overflow-hidden mb-4">
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
             <table className="w-full text-left text-sm">
-              <thead className="bg-slate-900 text-slate-300 uppercase font-bold text-xs">
+              <thead className="bg-slate-900 text-slate-300 uppercase font-bold text-xs sticky top-0 z-10">
                 <tr>
                   <th className="p-4">Từ viết tắt</th>
                   <th className="p-4">Câu đầy đủ</th>
