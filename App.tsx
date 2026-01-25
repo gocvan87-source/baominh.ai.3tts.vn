@@ -981,40 +981,40 @@ const App: React.FC = () => {
         // 1. LUÔN extract abbreviations trước và hiển thị modal xác nhận
         // Người dùng cần kiểm tra và xác nhận trước khi tiếp tục generate audio
         try {
-          const extracted = await extractAbbreviations(text, key);
-          if (extracted.length > 0) {
-            // Lọc các abbreviations mới (chưa có trong từ điển)
-            const existingAbbrs = new Set(abbreviations.map(a => a.abbreviation.toUpperCase()));
-            const newAbbrs = extracted.filter(item => 
-              !existingAbbrs.has(item.abbreviation.toUpperCase())
-            );
+          addLog("Đang phân tích từ viết tắt trong văn bản...", "info");
+          const extracted = await extractAbbreviations(text, key, addLog);
+          
+          console.log("Extracted abbreviations:", extracted);
+          
+          // LUÔN hiển thị modal nếu có abbreviations được phát hiện (bất kể mới hay cũ)
+          // Để người dùng có thể xem lại, thêm, sửa, xóa trước khi tiếp tục
+          if (extracted && extracted.length > 0) {
+            addLog(`Đã phát hiện ${extracted.length} từ viết tắt. Đang hiển thị để xác nhận...`, "info");
+            console.log("Hiển thị modal với abbreviations:", extracted);
             
-            // Hiển thị modal ngay cả khi không có abbreviations mới (để người dùng xem lại)
-            // Nếu có abbreviations mới, hiển thị modal với các abbreviations mới
-            // Nếu không có mới nhưng có abbreviations đã có, vẫn hiển thị để người dùng xem lại
-            const abbrsToShow = newAbbrs.length > 0 ? newAbbrs : extracted;
+            // Hiển thị modal với TẤT CẢ abbreviations đã phát hiện
+            const confirmed = await new Promise<boolean>((resolve) => {
+              console.log("Setting pending abbreviations and showing modal");
+              setPendingAbbreviations(extracted);
+              setShowAbbreviationModal(true);
+              setAbbreviationModalResolve(() => resolve);
+            });
             
-            if (abbrsToShow.length > 0) {
-              // Hiển thị modal và đợi người dùng xác nhận
-              const confirmed = await new Promise<boolean>((resolve) => {
-                setPendingAbbreviations(abbrsToShow);
-                setShowAbbreviationModal(true);
-                setAbbreviationModalResolve(() => resolve);
-              });
-              
-              if (!confirmed) {
-                // Người dùng hủy, dừng quá trình generate audio
-                setState(prev => ({...prev, isGeneratingAudio: false}));
-                return;
-              }
+            if (!confirmed) {
+              // Người dùng hủy, dừng quá trình generate audio
+              addLog("Người dùng đã hủy quá trình tạo âm thanh.", "warning");
+              setState(prev => ({...prev, isGeneratingAudio: false}));
+              return;
             }
+            
+            addLog("Người dùng đã xác nhận từ viết tắt. Tiếp tục tạo âm thanh...", "info");
           } else {
             // Nếu không phát hiện abbreviations, vẫn tiếp tục (không cần modal)
-            addLog("Không phát hiện từ viết tắt nào trong văn bản.", "info");
+            addLog("Không phát hiện từ viết tắt nào trong văn bản. Tiếp tục tạo âm thanh...", "info");
           }
         } catch (e) {
           // Nếu extract lỗi, vẫn tiếp tục generate audio
-          console.warn("Không thể extract abbreviations:", e);
+          console.error("Không thể extract abbreviations:", e);
           addLog("Không thể phân tích từ viết tắt, tiếp tục xử lý...", "warning");
         }
         
